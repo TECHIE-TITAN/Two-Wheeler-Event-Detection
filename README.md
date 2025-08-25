@@ -8,8 +8,8 @@ Tasks Distribution:
 
 To activate environment use:
 
-  source .venv/bin/activate
+`source .venv/bin/activate`
 
 Also install RPi.GPIO in your global system using:
 
-  sudo apt install python3-rpi.gpio
+`sudo apt install python3-rpi.gpio`
