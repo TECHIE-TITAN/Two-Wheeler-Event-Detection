@@ -20,9 +20,10 @@ def rc_time(pin=LDR_PIN):
 def get_light_status():
     light_level = rc_time()
     if light_level < 500:   # Adjust threshold
-        return "Daytime"
+        return "Day"
     else:
-        return "Nighttime"
+        return "Night"
 
 def cleanup():
     GPIO.cleanup()
+
