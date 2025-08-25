@@ -1,0 +1,4 @@
+RPi.GPIO
+pynmea2
+pyserial
+smbus2
