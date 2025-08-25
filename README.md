@@ -5,3 +5,11 @@ Tasks Distribution:
   - Naman Aggarwal: SD Card Configuration
   - Shivek Gupta: Pi Cam Module 3 Config
   - Samarth Singla: LiDAR Sensor
+
+To activate environment use:
+
+  source .venv/bin/activate
+
+Also install RPi.GPIO in your global system using:
+
+  sudo apt install python3-rpi.gpio
