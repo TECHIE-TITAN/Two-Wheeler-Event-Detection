@@ -1,1 +1,7 @@
 # Two-Wheeler-Event-Detection
+
+Tasks Distribution:
+  - Vansh Goyal: MPU 6500, GPS Neo-6M Module, LDR Sensor
+  - Naman Aggarwal: SD Card Configuration
+  - Shivek Gupta: Pi Cam Module 3 Config
+  - Samarth Singla: LiDAR Sensor
