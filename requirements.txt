@@ -6,3 +6,4 @@ board
 busio
 digitalio
 adafruit_vl53l0x
+cv2
