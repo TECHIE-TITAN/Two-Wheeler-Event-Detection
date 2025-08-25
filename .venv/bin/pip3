@@ -1,5 +1,5 @@
 #!/bin/sh
-'''exec' "/home/vansh-goyal/Desktop/WorkSpace/Sem-3/Embedded Systems/Two-Wheeler Event Detection/Two-Wheeler-Event-Detection/.venv/bin/python3" "$0" "$@"
+'''exec' "/home/samarth-singla/Desktop/ESW hunters/Two-Wheeler-Event-Detection/.venv/bin/python3" "$0" "$@"
 ' '''
 # -*- coding: utf-8 -*-
 import re
