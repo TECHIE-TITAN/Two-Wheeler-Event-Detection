@@ -2,3 +2,7 @@ RPi.GPIO
 pynmea2
 pyserial
 smbus2
+board
+busio
+digitalio
+adafruit_vl53l0x
