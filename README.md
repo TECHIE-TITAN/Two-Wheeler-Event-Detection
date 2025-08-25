@@ -13,3 +13,7 @@ To activate environment use:
 Also install RPi.GPIO in your global system using:
 
   ```sudo apt install python3-rpi.gpio```
+
+To install libraries, run:
+
+  ``` pip install -r requirements.txt```
