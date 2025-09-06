@@ -4,4 +4,5 @@ pyserial
 smbus2
 adafruit-blinka
 adafruit-circuitpython-vl53l0x
+adafruit-circuitpython-busdevice
 opencv-python
