@@ -6,7 +6,7 @@ import queue
 # import camera_utils # Commented out
 import mpu_utils
 import gps_utils
-import lidar_utils
+# import lidar_utils # Commented out
 import ldr_utils
 # import cv2 # Commented out
 import RPi.GPIO as GPIO
@@ -48,7 +48,7 @@ def main():
     # Initialize all sensor systems
     mpu_utils.init_mpu()
     gps_serial = gps_utils.init_gps()
-    lidar_sensor = lidar_utils.init_lidar()
+    # lidar_sensor = lidar_utils.init_lidar() # Commented out
     ldr_utils.init_ldr()
 
     # Create and start a thread for each sensor
@@ -56,7 +56,7 @@ def main():
         # threading.Thread(target=sensor_thread, args=(camera_utils.get_camera_image_matrix, "image_matrix")), # Commented out
         threading.Thread(target=sensor_thread, args=(mpu_utils.get_mpu_data, "mpu_data")),
         threading.Thread(target=sensor_thread, args=(gps_utils.get_gps_data, "gps_data", gps_serial)),
-        threading.Thread(target=sensor_thread, args=(lidar_utils.get_lidar_data, "lidar_data", lidar_sensor)),
+        # threading.Thread(target=sensor_thread, args=(lidar_utils.get_lidar_data, "lidar_data", lidar_sensor)), # Commented out
         threading.Thread(target=sensor_thread, args=(ldr_utils.get_ldr_status, "ldr_status")),
     ]
 
