@@ -2,17 +2,26 @@ import time
 import board
 import digitalio
 import adafruit_vl53l0x
+import bitbangio  # Import the library for software I2C
 
 # --- Sensor and I2C Configuration ---
 
-# Define the I2C bus
-i2c = board.I2C()
+# V V V V V V V V V V V V V V V V V V V V V V V V
+# -- THIS IS THE MAIN CHANGE --
+# Define the custom GPIO pins for our new software I2C bus
+scl_pin = board.D24  # SCL is on GPIO 24 (Pin 18)
+sda_pin = board.D23  # SDA is on GPIO 23 (Pin 16)
+
+# Initialize the software I2C bus on our chosen pins
+i2c = bitbangio.I2C(scl_pin, sda_pin)
+# -- END OF CHANGE --
+# ^ ^ ^ ^ ^ ^ ^ ^ ^ ^ ^ ^ ^ ^ ^ ^ ^ ^ ^ ^ ^ ^ ^ ^
+
 
 # Define the GPIO pins connected to the XSHUT pin of each sensor
 xshut_pins = [
     board.D4,   # Pin for sensor 1
     board.D17   # Pin for sensor 2
-    # board.D27 has been removed
 ]
 
 # Create a list to hold the sensor objects
@@ -25,36 +34,28 @@ shutdown_pins = []
 for pin in xshut_pins:
     shutdown_pin = digitalio.DigitalInOut(pin)
     shutdown_pin.direction = digitalio.Direction.OUTPUT
-    shutdown_pin.value = False  # Set to low/off
+    shutdown_pin.value = False
     shutdown_pins.append(shutdown_pin)
 
 # New I2C addresses for the sensors
-new_addresses = [0x30, 0x31] # Address for Sensor 3 (0x32) has been removed
+new_addresses = [0x30, 0x31]
 
 # Sequentially enable each sensor and change its I2C address
-print("Initializing 2 sensors...")
+print("Initializing 2 sensors on software I2C bus...")
 for i, shutdown_pin in enumerate(shutdown_pins):
-    # Turn on the current sensor by setting its XSHUT pin high
     shutdown_pin.value = True
-    time.sleep(0.1)  # Give the sensor time to wake up
+    time.sleep(0.1)
 
     try:
-        # Create a sensor instance with the default I2C address
         sensor = adafruit_vl53l0x.VL53L0X(i2c)
-        
-        # Change the I2C address of the sensor
-        new_address = new_addresses[i]
-        sensor.set_address(new_address)
-        
-        # Add the configured sensor to our list
+        sensor.set_address(new_addresses[i])
         sensors.append(sensor)
-        print(f"Sensor {i+1} initialized with new address {hex(new_address)}")
+        print(f"Sensor {i+1} initialized with new address {hex(new_addresses[i])}")
         
     except Exception as e:
         print(f"Failed to initialize sensor {i+1}: {e}")
         exit()
 
-# Check if all sensors were initialized
 if len(sensors) != len(xshut_pins):
     print("Not all sensors were initialized. Exiting.")
     exit()
@@ -62,7 +63,6 @@ if len(sensors) != len(xshut_pins):
 
 # --- Main Loop ---
 def get_all_distances():
-    """Reads distance from all sensors and returns them in a list."""
     readings = []
     for i, sensor in enumerate(sensors):
         try:
@@ -70,21 +70,14 @@ def get_all_distances():
             readings.append(distance)
         except Exception as e:
             print(f"Error reading from sensor {i+1}: {e}")
-            readings.append(-1) # Use -1 to indicate an error
+            readings.append(-1)
     return readings
 
 try:
     print("\nStarting measurements. Press Ctrl+C to stop.")
     while True:
-        # Get the distances from all sensors as a list
-        distances_list = get_all_distances()
-        
-        # Convert the list to a tuple
-        distances_tuple = tuple(distances_list)
-        
-        # Print the tuple of readings
+        distances_tuple = tuple(get_all_distances())
         print(f"Distances (mm): {distances_tuple}")
-        
         time.sleep(0.5)
 
 except KeyboardInterrupt:
