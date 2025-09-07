@@ -27,10 +27,9 @@ try:
         image_array = picam2.capture_array()
 
         # --- Requirement 1: Display the image as an array on the terminal ---
-        print("\n--- Image Array Data ---")
-        # Note: This will be a large output!
-        print(image_array)
-        print("------------------------")
+        print("\n--- Top-left 5x5 Pixel Array ---")
+        print(image_array[:5, :5])   # top-left corner (5 rows, 5 cols)
+        print("-------------------------------")
 
         # --- Requirement 2: Save the image to the 'captured_images' folder ---
         timestamp = time.strftime("%Y%m%d-%H%M%S")
