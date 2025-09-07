@@ -3,12 +3,12 @@
 import time
 import threading
 import queue
-import camera_utils
+# import camera_utils # Commented out
 import mpu_utils
 import gps_utils
 import lidar_utils
 import ldr_utils
-import cv2
+# import cv2 # Commented out
 import RPi.GPIO as GPIO
 
 # Global data object and lock for thread-safe access
@@ -53,7 +53,7 @@ def main():
 
     # Create and start a thread for each sensor
     threads = [
-        threading.Thread(target=sensor_thread, args=(camera_utils.get_camera_image_matrix, "image_matrix")),
+        # threading.Thread(target=sensor_thread, args=(camera_utils.get_camera_image_matrix, "image_matrix")), # Commented out
         threading.Thread(target=sensor_thread, args=(mpu_utils.get_mpu_data, "mpu_data")),
         threading.Thread(target=sensor_thread, args=(gps_utils.get_gps_data, "gps_data", gps_serial)),
         threading.Thread(target=sensor_thread, args=(lidar_utils.get_lidar_data, "lidar_data", lidar_sensor)),
@@ -92,7 +92,4 @@ def main():
         if gps_serial:
             gps_serial.close()
         GPIO.cleanup()
-        cv2.destroyAllWindows()
-
-if __name__ == "__main__":
-    main()
+        # cv2.destroyAllWindows() # Commented out
