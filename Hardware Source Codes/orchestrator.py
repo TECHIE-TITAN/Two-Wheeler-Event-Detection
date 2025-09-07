@@ -7,8 +7,8 @@ import os
 MY_ENV = os.path.expanduser("~/Desktop/Two-Wheeler-Event-Detection/my_env/bin/python")
 VENV = os.path.expanduser("~/Desktop/Two-Wheeler-Event-Detection/.venv/bin/python")
 
-MAIN_SCRIPT = os.path.expanduser("~/Desktop/Two-Wheeler-Event-Detection/Hardware_code/main.py")
-CAMERA_SCRIPT = os.path.expanduser("~/Desktop/Two-Wheeler-Event-Detection/Hardware_code/camera_utils.py")
+MAIN_SCRIPT = os.path.expanduser("~/Desktop/Two-Wheeler-Event-Detection/Hardware\ Source\ Codes//main.py")
+CAMERA_SCRIPT = os.path.expanduser("~/Desktop/Two-Wheeler-Event-Detection/Hardware\ Source\ Codes//camera_utils.py")
 
 def main():
     # Start both processes
