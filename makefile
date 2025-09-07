@@ -1,3 +1,5 @@
+SHELL := /bin/bash
+
 # Absolute paths to your virtual environments
 MY_ENV=~/Desktop/Two-Wheeler-Event-Detection/my_env
 VENV=~/Desktop/Two-Wheeler-Event-Detection/.venv
