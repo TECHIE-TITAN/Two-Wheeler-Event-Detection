@@ -11,7 +11,7 @@ def init_gps(port="/dev/serial0", baudrate=9600):
 
 def get_gps_data(gps_serial):
     """
-    Reads and returns a 2-tuple of GPS latitude and longitude.
+    Reads and returns a 3-tuple of GPS latitude, longitude, and speed (in km/h if available).
     Returns None if no valid data is found.
     """
     if not gps_serial:
@@ -20,7 +20,16 @@ def get_gps_data(gps_serial):
         gps_data = gps_serial.readline().decode('ascii', errors='replace')
         if gps_data.startswith("$GPGGA") or gps_data.startswith("$GPRMC"):
             msg = pynmea2.parse(gps_data)
-            return (msg.latitude, msg.longitude)
+            latitude = msg.latitude
+            longitude = msg.longitude
+            # Speed is only available in GPRMC messages (in knots)
+            speed = None
+            if hasattr(msg, 'spd_over_grnd') and msg.spd_over_grnd is not None:
+                try:
+                    speed = float(msg.spd_over_grnd) * 1.852  # Convert knots to km/h
+                except Exception:
+                    speed = None
+            return (latitude, longitude, speed)
     except Exception as e:
         pass
     return None
