@@ -90,8 +90,16 @@ def main():
                     # Print the integrated object to the console
                     current_data = sensor_data.copy()
                     print(current_data)
+                    
+                    # Prepare data for CSV, handling None values gracefully
+                    gps_data_tuple = current_data.get('gps_data')
+                    if gps_data_tuple:
+                        latitude = gps_data_tuple[0]
+                        longitude = gps_data_tuple[1]
+                    else:
+                        latitude = None
+                        longitude = None
 
-                    # Prepare data for CSV
                     row_data = {
                         'timestamp': time.time(),
                         'acc_x': current_data.get('mpu_data', (None, None, None, None, None, None))[0],
@@ -100,8 +108,8 @@ def main():
                         'gyro_x': current_data.get('mpu_data', (None, None, None, None, None, None))[3],
                         'gyro_y': current_data.get('mpu_data', (None, None, None, None, None, None))[4],
                         'gyro_z': current_data.get('mpu_data', (None, None, None, None, None, None))[5],
-                        'latitude': current_data.get('gps_data', (None, None))[0],
-                        'longitude': current_data.get('gps_data', (None, None))[1],
+                        'latitude': latitude,
+                        'longitude': longitude,
                         'ldr_status': current_data.get('ldr_status')
                     }
                     writer.writerow(row_data)
