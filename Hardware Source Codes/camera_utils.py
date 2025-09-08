@@ -1,57 +1,49 @@
 import time
 import os
-import cv2 # We need OpenCV to save the array as an image
+import cv2
 from picamera2 import Picamera2
 
-# --- Configuration ---
-SAVE_DIRECTORY = "captured_images"
+DEFAULT_SAVE_DIRECTORY = "captured_images"
 
-# --- Initialization ---
-# 1. Create the directory for saving images if it doesn't exist
-if not os.path.exists(SAVE_DIRECTORY):
-    os.makedirs(SAVE_DIRECTORY)
-    print(f"Directory '{SAVE_DIRECTORY}' created.")
+class CameraManager:
+    """Wrapper around Picamera2 to provide single-frame capture API."""
+    def __init__(self, resolution=(640, 480), save_dir=DEFAULT_SAVE_DIRECTORY):
+        self.save_dir = save_dir
+        if not os.path.exists(self.save_dir):
+            os.makedirs(self.save_dir)
+        self.picam2 = Picamera2()
+        config = self.picam2.create_preview_configuration(main={"size": resolution})
+        self.picam2.configure(config)
+        self.picam2.start()
+        time.sleep(0.2)  # small warm-up
 
-# Standard camera setup
-picam2 = Picamera2()
-config = picam2.create_preview_configuration(main={"size": (640, 480)})
-picam2.configure(config)
-picam2.start()
-print("Camera initialized. Starting capture every 2 seconds...")
-time.sleep(1) 
+    def capture_image(self, prefix="frame"):
+        """Captures a frame, stores it as JPEG, returns filepath."""
+        try:
+            image_array = self.picam2.capture_array()
+            timestamp = time.time()
+            filename = f"{prefix}_{int(timestamp*1000)}.jpg"
+            filepath = os.path.join(self.save_dir, filename)
+            bgr_image = cv2.cvtColor(image_array, cv2.COLOR_RGB2BGR)
+            cv2.imwrite(filepath, bgr_image)
+            return filepath
+        except Exception as e:
+            print(f"Camera capture error: {e}")
+            return None
 
-# --- Main Loop ---
-try:
-    while True:
-        # Capture the image data as a NumPy array (this is the 2D/3D array)
-        image_array = picam2.capture_array()
+    def close(self):
+        try:
+            self.picam2.stop()
+        except Exception:
+            pass
 
-        # --- Requirement 1: Display the image as an array on the terminal ---
-        print("\n--- Top-left 5x5 Pixel Array ---")
-        print(image_array[:5, :5])   # top-left corner (5 rows, 5 cols)
-        print("-------------------------------")
+def init_camera(resolution=(640,480), save_dir=DEFAULT_SAVE_DIRECTORY):
+    """Initializes and returns a CameraManager instance."""
+    return CameraManager(resolution=resolution, save_dir=save_dir)
 
-        # --- Requirement 2: Save the image to the 'captured_images' folder ---
-        timestamp = time.strftime("%Y%m%d-%H%M%S")
-        filename = f"capture_{timestamp}.jpg"
-        # Create the full path to the file
-        filepath = os.path.join(SAVE_DIRECTORY, filename)
-        
-        # Picamera2 captures in RGB format, but OpenCV saves in BGR format.
-        # We need to convert the color channels before saving.
-        bgr_image = cv2.cvtColor(image_array, cv2.COLOR_RGB2BGR)
-        cv2.imwrite(filepath, bgr_image)
-        
-        print(f"Image saved: {filepath}")
-        
-        # Wait for 2 seconds before the next capture
-        time.sleep(2)
+def capture_image(camera_manager):
+    """Helper to match previous style; captures and returns image filepath."""
+    if camera_manager is None:
+        return None
+    return camera_manager.capture_image()
 
-except KeyboardInterrupt:
-    # This block runs when you press Ctrl+C in the terminal
-    print("\nCapture stopped by user.")
-
-finally:
-    # Cleanly stop the camera
-    picam2.stop()
-    print("Camera stopped.")
