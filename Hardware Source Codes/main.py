@@ -3,6 +3,8 @@
 import time
 import threading
 import queue
+import csv
+import os
 # import camera_utils # Commented out
 import mpu_utils
 import gps_utils
@@ -63,33 +65,61 @@ def main():
     for t in threads:
         t.start()
 
-    try:
-        while True:
-            # Signal all threads to take a reading
-            read_event.set()
+    # Setup CSV file for writing
+    timestamp = time.strftime("%Y%m%d-%H%M%S")
+    csv_filename = f"sensor_data_{timestamp}.csv"
+    file_exists = os.path.isfile(csv_filename)
 
-            # Wait for all threads to finish their reading cycle
-            time.sleep(1)
-            
-            # Use a lock to safely access the global data dictionary
-            with data_lock:
-                # Print the integrated object to the console
-                print(sensor_data)
-            
-            # Implement a sleep mechanism to save power
-            # The sensors read once every 5 seconds.
-            time.sleep(4)
+    with open(csv_filename, 'a', newline='') as csvfile:
+        fieldnames = ['timestamp', 'acc_x', 'acc_y', 'acc_z', 'gyro_x', 'gyro_y', 'gyro_z', 'latitude', 'longitude', 'ldr_status']
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
 
-    except KeyboardInterrupt:
-        print("Program terminated by user.")
-    finally:
-        # Signal all threads to stop and wait for them to join
-        stop_event.set()
-        for t in threads:
-            t.join()
-        
-        # Cleanup resources
-        if gps_serial:
-            gps_serial.close()
-        GPIO.cleanup()
-        # cv2.destroyAllWindows() # Commented out
+        if not file_exists:
+            writer.writeheader()
+
+        try:
+            while True:
+                # Signal all threads to take a reading
+                read_event.set()
+
+                # Wait for all threads to finish their reading cycle
+                time.sleep(1)
+                
+                # Use a lock to safely access the global data dictionary
+                with data_lock:
+                    # Print the integrated object to the console
+                    current_data = sensor_data.copy()
+                    print(current_data)
+
+                    # Prepare data for CSV
+                    row_data = {
+                        'timestamp': time.time(),
+                        'acc_x': current_data.get('mpu_data', (None, None, None, None, None, None))[0],
+                        'acc_y': current_data.get('mpu_data', (None, None, None, None, None, None))[1],
+                        'acc_z': current_data.get('mpu_data', (None, None, None, None, None, None))[2],
+                        'gyro_x': current_data.get('mpu_data', (None, None, None, None, None, None))[3],
+                        'gyro_y': current_data.get('mpu_data', (None, None, None, None, None, None))[4],
+                        'gyro_z': current_data.get('mpu_data', (None, None, None, None, None, None))[5],
+                        'latitude': current_data.get('gps_data', (None, None))[0],
+                        'longitude': current_data.get('gps_data', (None, None))[1],
+                        'ldr_status': current_data.get('ldr_status')
+                    }
+                    writer.writerow(row_data)
+                
+                # Implement a sleep mechanism to save power
+                # The sensors read once every 5 seconds.
+                time.sleep(4)
+
+        except KeyboardInterrupt:
+            print("Program terminated by user.")
+        finally:
+            # Signal all threads to stop and wait for them to join
+            stop_event.set()
+            for t in threads:
+                t.join()
+            
+            # Cleanup resources
+            if gps_serial:
+                gps_serial.close()
+            GPIO.cleanup()
+            # cv2.destroyAllWindows() # Commented out
