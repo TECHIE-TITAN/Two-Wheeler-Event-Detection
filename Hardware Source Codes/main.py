@@ -123,3 +123,5 @@ def main():
                 gps_serial.close()
             GPIO.cleanup()
             # cv2.destroyAllWindows() # Commented out
+
+main()
