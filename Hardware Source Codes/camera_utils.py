@@ -53,22 +53,26 @@ if __name__ == '__main__':
     It serves as a simple test to verify camera functionality.
     """
     print("--- Running Camera Test ---")
-    
+
     # 1. Initialize the camera
     cam_manager = init_camera()
 
     if cam_manager:
         try:
-            # 2. Capture a few images
-            print("\nCapturing 3 images...")
-            for i in range(3):
+            # 2. Continuously capture images until stopped
+            print("\nContinuously capturing images every 2 seconds. Press Ctrl+C to stop.")
+            image_count = 0
+            while True:
+                image_count += 1
                 filepath = capture_image(cam_manager)
                 if filepath:
-                    print(f"  [{i+1}/3] Image saved to: {filepath}")
+                    print(f"  [Image {image_count}] saved to: {filepath}")
                 else:
-                    print(f"  [{i+1}/3] Failed to capture image.")
-                time.sleep(1) # Wait a second between captures
+                    print(f"  [Image {image_count}] Failed to capture.")
+                time.sleep(2)  # Wait 2 seconds between captures
 
+        except KeyboardInterrupt:
+            print("\n\nStopping capture...")
         except Exception as e:
             print(f"An error occurred during capture: {e}")
         finally:
@@ -78,3 +82,4 @@ if __name__ == '__main__':
             print("\n--- Camera Test Finished ---")
     else:
         print("Could not start camera manager. Exiting test.")
+
