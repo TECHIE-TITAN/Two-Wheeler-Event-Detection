@@ -1,13 +1,13 @@
-# This is the main script that integrates all sensor data and prints the combined object.
-
 import time
 import threading
 import queue
 import csv
 import os
 # import camera_utils # Commented out
+# ...existing code...
 import mpu_utils
 import gps_utils
+import speed_limit_utils
 # import lidar_utils # Commented out
 import ldr_utils
 # import cv2 # Commented out
@@ -70,11 +70,13 @@ def main():
     file_exists = os.path.isfile(csv_filename)
 
     with open(csv_filename, 'a', newline='') as csvfile:
-        fieldnames = ['timestamp', 'acc_x', 'acc_y', 'acc_z', 'gyro_x', 'gyro_y', 'gyro_z', 'latitude', 'longitude', 'ldr_status']
+        fieldnames = ['timestamp', 'acc_x', 'acc_y', 'acc_z', 'gyro_x', 'gyro_y', 'gyro_z', 'latitude', 'longitude', 'speed', 'speed_limit', 'ldr_status']
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
 
         if not file_exists:
             writer.writeheader()
+
+        API_KEY = "50c25aHLICdWQ4JbXp2MZwgmliGxvqJ8os1MOYe3"
 
         try:
             while True:
@@ -83,21 +85,26 @@ def main():
 
                 # Wait for all threads to finish their reading cycle
                 time.sleep(1)
-                
+
                 # Use a lock to safely access the global data dictionary
                 with data_lock:
-                    # Print the integrated object to the console
                     current_data = sensor_data.copy()
                     print(current_data)
-                    
-                    # Prepare data for CSV, handling None values gracefully
+
                     gps_data_tuple = current_data.get('gps_data')
                     if gps_data_tuple:
                         latitude = gps_data_tuple[0]
                         longitude = gps_data_tuple[1]
+                        speed = gps_data_tuple[2] if len(gps_data_tuple) > 2 else None
                     else:
                         latitude = None
                         longitude = None
+                        speed = None
+
+                    # Get speed limit from API if lat/lon are available
+                    speed_limit = None
+                    if latitude is not None and longitude is not None:
+                        speed_limit = speed_limit_utils.get_speed_limit(latitude, longitude, API_KEY)
 
                     row_data = {
                         'timestamp': time.time(),
@@ -109,10 +116,12 @@ def main():
                         'gyro_z': current_data.get('mpu_data', (None, None, None, None, None, None))[5],
                         'latitude': latitude,
                         'longitude': longitude,
+                        'speed': speed,
+                        'speed_limit': speed_limit,
                         'ldr_status': current_data.get('ldr_status')
                     }
                     writer.writerow(row_data)
-                
+
                 # Implement a sleep mechanism to save power
                 # The sensors read once every 5 seconds.
                 time.sleep(4)
@@ -124,7 +133,7 @@ def main():
             stop_event.set()
             for t in threads:
                 t.join()
-            
+
             # Cleanup resources
             if gps_serial:
                 gps_serial.close()
