@@ -47,3 +47,34 @@ def capture_image(camera_manager):
         return None
     return camera_manager.capture_image()
 
+if __name__ == '__main__':
+    """
+    This block runs when the script is executed directly.
+    It serves as a simple test to verify camera functionality.
+    """
+    print("--- Running Camera Test ---")
+    
+    # 1. Initialize the camera
+    cam_manager = init_camera()
+
+    if cam_manager:
+        try:
+            # 2. Capture a few images
+            print("\nCapturing 3 images...")
+            for i in range(3):
+                filepath = capture_image(cam_manager)
+                if filepath:
+                    print(f"  [{i+1}/3] Image saved to: {filepath}")
+                else:
+                    print(f"  [{i+1}/3] Failed to capture image.")
+                time.sleep(1) # Wait a second between captures
+
+        except Exception as e:
+            print(f"An error occurred during capture: {e}")
+        finally:
+            # 3. Clean up and close the camera
+            print("\nClosing camera...")
+            cam_manager.close()
+            print("\n--- Camera Test Finished ---")
+    else:
+        print("Could not start camera manager. Exiting test.")
