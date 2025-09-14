@@ -2,11 +2,11 @@ import time
 import csv
 import os
 import threading
-import mpu_utils # type: ignore  # noqa
-import gps_utils # type: ignore  # noqa
-import speed_limit_utils # type: ignore  # noqa
-import camera_utils # type: ignore  # noqa
-import firebase_uploader # type: ignore  # noqa
+import glob
+import mpu_utils  # type: ignore
+import gps_utils  # type: ignore
+import speed_limit_utils  # type: ignore
+import firebase_uploader  # type: ignore
 
 TARGET_HZ = 1
 SAMPLE_INTERVAL = 1.0 / TARGET_HZ
@@ -15,10 +15,11 @@ SPEED_LIMIT_REFRESH_S = 1.0
 FIREBASE_PUSH_INTERVAL_S = 1.0
 USER_ID = "demo_user_123"
 
+IMAGE_DIR = "/tmp/camera_images/"
+
 data_lock = threading.Lock()
 latest_mpu = (None, None, None, None, None, None)
-latest_gps = (None, None, None)  # lat, lon, speed(km/h)
-latest_image_path = None
+latest_gps = (None, None, None)
 latest_speed_limit = None
 last_speed_limit_fetch = 0.0
 stop_event = threading.Event()
@@ -46,14 +47,29 @@ def gps_thread(gps_serial):
         time.sleep(0.2)
 
 
-def camera_thread(camera_manager):
-    global latest_image_path
-    while not stop_event.is_set():
-        path = camera_utils.capture_image(camera_manager)
-        if path:
-            with data_lock:
-                latest_image_path = path
-        time.sleep(SAMPLE_INTERVAL)
+def get_latest_image_for_timestamp(target_timestamp_ms):
+    # List all image files in IMAGE_DIR
+    image_files = glob.glob(os.path.join(IMAGE_DIR, "frame_*.jpg"))
+    if not image_files:
+        return None
+
+    # Extract timestamp from filenames and find closest before or at target_timestamp_ms
+    best_image = None
+    smallest_diff = float('inf')
+
+    for filepath in image_files:
+        filename = os.path.basename(filepath)
+        try:
+            ts_part = filename.split('_')[1].split('.')[0]
+            image_ts = int(ts_part)
+            time_diff = target_timestamp_ms - image_ts
+            if 0 <= time_diff < smallest_diff:
+                smallest_diff = time_diff
+                best_image = filepath
+        except (IndexError, ValueError):
+            continue
+
+    return best_image
 
 
 def main():
@@ -66,20 +82,12 @@ def main():
     # Initialize sensors
     mpu_utils.init_mpu()
     gps_serial = gps_utils.init_gps()
-    camera_manager = None
-    try:
-        camera_manager = camera_utils.init_camera()
-    except Exception as e:
-        print(f"Camera init failed: {e}")
 
     # Start sensor threads
     threads = [
         threading.Thread(target=mpu_thread, daemon=True),
-        threading.Thread(target=gps_thread, args=(gps_serial,), daemon=True),
+        threading.Thread(target=gps_thread, args=(gps_serial,), daemon=True)
     ]
-    if camera_manager:
-        threads.append(threading.Thread(target=camera_thread, args=(camera_manager,), daemon=True))
-
     for t in threads:
         t.start()
 
@@ -89,7 +97,9 @@ def main():
     except Exception as e:
         print(f"Firebase ride init failed: {e}")
 
-    csv_filename = "sensor_stream.csv"
+    # Prepare CSV
+    timestamp_str = time.strftime('%Y%m%d-%H%M%S')
+    csv_filename = f"sensor_stream_{timestamp_str}.csv"
     fieldnames = [
         'timestamp', 'image_path', 'acc_x', 'acc_y', 'acc_z', 'gyro_x', 'gyro_y', 'gyro_z',
         'latitude', 'longitude', 'speed', 'speed_limit'
@@ -103,6 +113,7 @@ def main():
         print(f"Logging at {TARGET_HZ} Hz to {csv_filename}. Press Ctrl+C to stop.")
         next_sample_time = time.perf_counter()
         last_fb_push = 0.0
+
         try:
             while not stop_event.is_set():
                 now = time.perf_counter()
@@ -113,7 +124,6 @@ def main():
                 with data_lock:
                     mpu = latest_mpu
                     gps = latest_gps
-                    img_path = latest_image_path
 
                 lat, lon, spd = gps
 
@@ -122,6 +132,9 @@ def main():
                     if (latest_speed_limit is None) or (t_now - last_speed_limit_fetch >= SPEED_LIMIT_REFRESH_S):
                         latest_speed_limit = speed_limit_utils.get_speed_limit(lat, lon, OLA_MAPS_API_KEY)
                         last_speed_limit_fetch = t_now
+
+                target_timestamp_ms = int(time.time() * 1000)
+                img_path = get_latest_image_for_timestamp(target_timestamp_ms)
 
                 row = {
                     'timestamp': time.time(),
@@ -132,6 +145,7 @@ def main():
                     'speed': spd,
                     'speed_limit': latest_speed_limit
                 }
+
                 writer.writerow(row)
                 if int(row['timestamp']) % 5 == 0:
                     f.flush()
@@ -153,11 +167,6 @@ def main():
             if gps_serial:
                 try:
                     gps_serial.close()
-                except Exception:
-                    pass
-            if camera_manager:
-                try:
-                    camera_manager.close()
                 except Exception:
                     pass
             print("Log complete.")
