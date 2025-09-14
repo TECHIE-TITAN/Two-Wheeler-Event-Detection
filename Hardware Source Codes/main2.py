@@ -1,39 +1,20 @@
-"""High-rate (30 Hz) sensor logger writing CSV rows each sample.
-
-CSV Columns: timestamp, image_path, acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z, latitude, longitude, speed, speed_limit
-
-Notes:
- - Camera image column stores the saved JPEG filepath (or blank if capture failed)
- - Speed limit API is rate-limited (queried at most once per second) to avoid excessive calls
- - Sensor readings are obtained via background threads keeping the latest sample; main loop logs at fixed 30 Hz
-"""
-
 import time
 import csv
 import os
 import threading
-import sys
+import mpu_utils # type: ignore  # noqa
+import gps_utils # type: ignore  # noqa
+import speed_limit_utils # type: ignore  # noqa
+import camera_utils # type: ignore  # noqa
+import firebase_uploader # type: ignore  # noqa
 
-# Dynamically add hardware folder to path (handles space in folder name)
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-HW_DIR = os.path.join(BASE_DIR, "Hardware Source Codes")
-if HW_DIR not in sys.path:
-    sys.path.append(HW_DIR)
-
-import mpu_utils  # type: ignore  # noqa
-import gps_utils  # type: ignore  # noqa
-import speed_limit_utils  # type: ignore  # noqa
-import camera_utils  # type: ignore  # noqa
-
-# ------------------------------------------------------------------
-# Configuration
-# ------------------------------------------------------------------
-TARGET_HZ = 30.0
+TARGET_HZ = 1
 SAMPLE_INTERVAL = 1.0 / TARGET_HZ
-API_KEY = "50c25aHLICdWQ4JbXp2MZwgmliGxvqJ8os1MOYe3"
-SPEED_LIMIT_REFRESH_S = 1.0  # call external API at most once per second
+OLA_MAPS_API_KEY = "50c25aHLICdWQ4JbXp2MZwgmliGxvqJ8os1MOYe3"
+SPEED_LIMIT_REFRESH_S = 1.0  
+FIREBASE_PUSH_INTERVAL_S = 1.0
+USER_ID = "demo_user_123"
 
-# Shared state
 data_lock = threading.Lock()
 latest_mpu = (None, None, None, None, None, None)
 latest_gps = (None, None, None)  # lat, lon, speed(km/h)
@@ -43,17 +24,13 @@ last_speed_limit_fetch = 0.0
 stop_event = threading.Event()
 
 
-# ------------------------------------------------------------------
-# Sensor Threads
-# ------------------------------------------------------------------
 def mpu_thread():
     global latest_mpu
     while not stop_event.is_set():
         data = mpu_utils.get_mpu_data()
         with data_lock:
             latest_mpu = data
-        # High internal rate; short sleep to reduce CPU
-        time.sleep(0.005)  # 200 Hz internal sampling attempt
+        time.sleep(0.005)
 
 
 def gps_thread(gps_serial):
@@ -62,12 +39,11 @@ def gps_thread(gps_serial):
         gps_data = gps_utils.get_gps_data(gps_serial)
         if gps_data:
             with data_lock:
-                # ensure tuple length 3
                 if len(gps_data) == 3:
                     latest_gps = gps_data
                 else:
                     latest_gps = (gps_data[0], gps_data[1], None)
-        time.sleep(0.2)  # GPS updates slower (5 Hz typical)
+        time.sleep(0.2)
 
 
 def camera_thread(camera_manager):
@@ -77,15 +53,15 @@ def camera_thread(camera_manager):
         if path:
             with data_lock:
                 latest_image_path = path
-        # Attempt to match logging rate loosely
         time.sleep(SAMPLE_INTERVAL)
 
 
-# ------------------------------------------------------------------
-# Main logger
-# ------------------------------------------------------------------
 def main():
     global latest_speed_limit, last_speed_limit_fetch
+    try:
+        firebase_uploader.init_auth()
+    except Exception as e:
+        print(f"Firebase auth init failed: {e}")
 
     # Initialize sensors
     mpu_utils.init_mpu()
@@ -107,9 +83,13 @@ def main():
     for t in threads:
         t.start()
 
-    # Prepare CSV
-    timestamp_str = time.strftime('%Y%m%d-%H%M%S')
-    csv_filename = f"sensor_stream_{timestamp_str}.csv"
+    # Initialize Firebase ride
+    try:
+        firebase_uploader.init_ride(USER_ID, int(time.time() * 1000))
+    except Exception as e:
+        print(f"Firebase ride init failed: {e}")
+
+    csv_filename = "sensor_stream.csv"
     fieldnames = [
         'timestamp', 'image_path', 'acc_x', 'acc_y', 'acc_z', 'gyro_x', 'gyro_y', 'gyro_z',
         'latitude', 'longitude', 'speed', 'speed_limit'
@@ -122,6 +102,7 @@ def main():
 
         print(f"Logging at {TARGET_HZ} Hz to {csv_filename}. Press Ctrl+C to stop.")
         next_sample_time = time.perf_counter()
+        last_fb_push = 0.0
         try:
             while not stop_event.is_set():
                 now = time.perf_counter()
@@ -129,7 +110,6 @@ def main():
                     time.sleep(next_sample_time - now)
                 next_sample_time += SAMPLE_INTERVAL
 
-                # Snapshot current values
                 with data_lock:
                     mpu = latest_mpu
                     gps = latest_gps
@@ -137,11 +117,10 @@ def main():
 
                 lat, lon, spd = gps
 
-                # Refresh speed limit if needed and we have coordinates
                 if lat is not None and lon is not None:
                     t_now = time.time()
                     if (latest_speed_limit is None) or (t_now - last_speed_limit_fetch >= SPEED_LIMIT_REFRESH_S):
-                        latest_speed_limit = speed_limit_utils.get_speed_limit(lat, lon, API_KEY)
+                        latest_speed_limit = speed_limit_utils.get_speed_limit(lat, lon, OLA_MAPS_API_KEY)
                         last_speed_limit_fetch = t_now
 
                 row = {
@@ -154,9 +133,16 @@ def main():
                     'speed_limit': latest_speed_limit
                 }
                 writer.writerow(row)
-                # Flush periodically to ensure data safety
                 if int(row['timestamp']) % 5 == 0:
                     f.flush()
+
+                if (time.time() - last_fb_push) >= FIREBASE_PUSH_INTERVAL_S:
+                    try:
+                        warnings = firebase_uploader.build_speeding_warning(spd, latest_speed_limit)
+                        firebase_uploader.update_rider_speed(USER_ID, spd, latest_speed_limit, warnings)
+                    except Exception as e:
+                        print(f"Firebase push error: {e}")
+                    last_fb_push = time.time()
 
         except KeyboardInterrupt:
             print("\nStopping logging...")

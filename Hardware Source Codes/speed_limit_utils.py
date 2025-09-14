@@ -11,9 +11,13 @@ def get_speed_limit(latitude, longitude, api_key):
         response = requests.get(url, params=params)
         if response.status_code == 200:
             data = response.json()
-            # Extract speed limit from response structure
-            # This may need adjustment based on actual API response
-            return data.get('speedLimits', [{}])[0].get('speedLimit')
+            # print("Full API Response:", data)  # For debugging
+            speed_limits = data.get('speed_limits', [])
+            if speed_limits:
+                return speed_limits[0].get('speedLimit')
+            else:
+                # print("No speed limit information available for this location.")
+                return None
         else:
             print(f"Speed limit API error: {response.status_code}")
     except Exception as e:
