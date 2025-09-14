@@ -6,7 +6,7 @@ DB_URL = "https://wheeler-event-detection-default-rtdb.asia-southeast1.firebased
 _API_KEY = "AIzaSyA__tMBGiQ-PVqyvv9kvNHaSUJk2QPXU-c"
 _EMAIL = "rpi@example.com"
 _PASSWORD = "rpi123456"
-_USER_ID = "demo_user_123"
+DEFAULT_USER_ID = "test_user_123"
 
 # Auth state
 _ID_TOKEN: Optional[str] = None
@@ -59,8 +59,8 @@ def _current_auth_token() -> str:
     return _ID_TOKEN
 
 
-def update_rider_speed(speed: float, speed_limit: float, warnings: Optional[Dict[str, dict]] = None) -> bool:
-    url = f"{DB_URL}/users/{_USER_ID}/rider_data.json?auth={_current_auth_token()}"
+def update_rider_speed(user_id: str, speed: float, speed_limit: float, warnings: Optional[Dict[str, dict]] = None) -> bool:
+    url = f"{DB_URL}/users/{user_id}/rider_data.json?auth={_current_auth_token()}"
     payload = {
         "current_speed": speed,
         "speed_limit": speed_limit,
@@ -87,8 +87,8 @@ def build_speeding_warning(speed: float, speed_limit: float) -> Dict[str, dict]:
     }
 
 
-def init_ride(start_timestamp_ms: int) -> bool:
-    url = f"{DB_URL}/users/{_USER_ID}/rider_control/ride_status.json?auth={_current_auth_token()}"
+def init_ride(user_id: str, start_timestamp_ms: int) -> bool:
+    url = f"{DB_URL}/users/{user_id}/rider_control/ride_status.json?auth={_current_auth_token()}"
     payload = {
         "is_active": True,
         "start_timestamp": start_timestamp_ms,

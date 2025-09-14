@@ -13,7 +13,7 @@ SAMPLE_INTERVAL = 1.0 / TARGET_HZ
 OLA_MAPS_API_KEY = "50c25aHLICdWQ4JbXp2MZwgmliGxvqJ8os1MOYe3"
 SPEED_LIMIT_REFRESH_S = 1.0  
 FIREBASE_PUSH_INTERVAL_S = 1.0
-USER_ID = "demo_user_123"
+USER_ID = "test_user_123"
 
 IMAGE_DIR = "/tmp/camera_images/"
 
@@ -98,8 +98,7 @@ def main():
         print(f"Firebase ride init failed: {e}")
 
     # Prepare CSV
-    timestamp_str = time.strftime('%Y%m%d-%H%M%S')
-    csv_filename = f"sensor_stream_{timestamp_str}.csv"
+    csv_filename = "sensor_stream.csv"
     fieldnames = [
         'timestamp', 'image_path', 'acc_x', 'acc_y', 'acc_z', 'gyro_x', 'gyro_y', 'gyro_z',
         'latitude', 'longitude', 'speed', 'speed_limit'
