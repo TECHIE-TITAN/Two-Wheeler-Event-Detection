@@ -12,5 +12,5 @@ run:
 	@sudo chmod 666 /dev/ttyS0
 	@echo "Starting camera_utils.py (.venv) and main.py (my_env) together..."
 	@(source $(VENV)/bin/activate && python $(CODE_DIR)/camera_utils.py) & \
-	 (source $(MY_ENV)/bin/activate && python $(CODE_DIR)/main.py) & \
+	 (source $(MY_ENV)/bin/activate && python $(CODE_DIR)/main2.py) & \
 	 wait
