@@ -15,7 +15,7 @@ SPEED_LIMIT_REFRESH_S = 1.0
 FIREBASE_PUSH_INTERVAL_S = 1.0
 USER_ID = "test_user_123"
 
-IMAGE_DIR = "/tmp/camera_images/"
+IMAGE_DIR = "camera_images/"
 
 data_lock = threading.Lock()
 latest_mpu = (None, None, None, None, None, None)
