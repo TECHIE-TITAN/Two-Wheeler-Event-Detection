@@ -7,3 +7,4 @@ adafruit-circuitpython-vl53l0x
 adafruit-circuitpython-busdevice
 opencv-python
 picamera2
+requests
