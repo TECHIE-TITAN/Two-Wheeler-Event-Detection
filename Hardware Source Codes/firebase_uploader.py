@@ -87,6 +87,38 @@ def build_speeding_warning(speed: float, speed_limit: float) -> Dict[str, dict]:
     }
 
 
+def update_rider_mpu(
+    user_id: str,
+    acc_x: float,
+    acc_y: float,
+    acc_z: float,
+    gyro_x: float,
+    gyro_y: float,
+    gyro_z: float,
+    timestamp_ms: Optional[int] = None
+) -> bool:
+    if timestamp_ms is None:
+        timestamp_ms = int(time.time() * 1000)
+    url = f"{DB_URL}/users/{user_id}/rider_data.json?auth={_current_auth_token()}"
+    payload = {
+        "mpu": {
+            "acc_x": acc_x,
+            "acc_y": acc_y,
+            "acc_z": acc_z,
+            "gyro_x": gyro_x,
+            "gyro_y": gyro_y,
+            "gyro_z": gyro_z,
+            "timestamp": timestamp_ms
+        }
+    }
+    try:
+        response = requests.patch(url, json=payload, timeout=5)
+        return response.status_code == 200
+    except Exception as e:
+        print(f"Firebase MPU update exception: {e}")
+        return False
+
+
 def init_ride(user_id: str, start_timestamp_ms: int) -> bool:
     url = f"{DB_URL}/users/{user_id}/rider_control/ride_status.json?auth={_current_auth_token()}"
     payload = {

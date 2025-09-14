@@ -151,6 +151,14 @@ def main():
 
                 if (time.time() - last_fb_push) >= FIREBASE_PUSH_INTERVAL_S:
                     try:
+                        # Push latest MPU data if available
+                        if all(v is not None for v in mpu):
+                            firebase_uploader.update_rider_mpu(
+                                USER_ID,
+                                mpu[0], mpu[1], mpu[2],
+                                mpu[3], mpu[4], mpu[5],
+                                target_timestamp_ms
+                            )
                         warnings = firebase_uploader.build_speeding_warning(spd, latest_speed_limit)
                         firebase_uploader.update_rider_speed(USER_ID, spd, latest_speed_limit, warnings)
                     except Exception as e:
