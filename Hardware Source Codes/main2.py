@@ -98,7 +98,7 @@ def main():
         print(f"Firebase ride init failed: {e}")
 
     # Prepare CSV
-    csv_filename = "sensor_stream.csv"
+    csv_filename = "sensor_data.csv"
     fieldnames = [
         'timestamp', 'image_path', 'acc_x', 'acc_y', 'acc_z', 'gyro_x', 'gyro_y', 'gyro_z',
         'latitude', 'longitude', 'speed', 'speed_limit'

@@ -5,7 +5,7 @@ MY_ENV=~/Desktop/Two-Wheeler-Event-Detection/my_env
 VENV=~/Desktop/Two-Wheeler-Event-Detection/.venv
 
 # Path to Python scripts
-CODE_DIR="Hardware Source Codes"
+CODE_DIR="Hardware\ Source\ Codes/"
 
 run:
 	@echo "Fixing GPS port permissions..."

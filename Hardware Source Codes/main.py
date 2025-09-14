@@ -66,8 +66,7 @@ def main():
         t.start()
 
     # Setup CSV file for writing
-    timestamp = time.strftime("%Y%m%d-%H%M%S")
-    csv_filename = f"sensor_data_{timestamp}.csv"
+    csv_filename = "sensor_data.csv"
     file_exists = os.path.isfile(csv_filename)
 
     with open(csv_filename, 'a', newline='') as csvfile:
