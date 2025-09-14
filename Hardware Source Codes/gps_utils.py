@@ -1,47 +1,89 @@
-# gps_logger.py -- save GPS NMEA data to CSV
-import serial
-import csv
-from datetime import datetime
+"""GPS utility functions for initializing and reading GPS data.
 
-# Replace with your serial port (usually /dev/serial0 or /dev/ttyAMA0)
+This module handles communication with a serial GPS device, specifically
+parsing the $GPRMC NMEA sentence to extract latitude, longitude, and speed.
+"""
+
+import serial
+
+# Configuration
 GPS_PORT = "/dev/serial0"
 GPS_BAUD = 9600
+KNOTS_TO_KMH = 1.852
 
-# Output CSV file
-csv_file = f"data/gps_{datetime.now().strftime('%m%d_%H%M%S')}.csv"
 
-# Ensure data folder exists
-import os
-os.makedirs("data", exist_ok=True)
+def init_gps(port=GPS_PORT, baud=GPS_BAUD):
+    """Initializes and opens the serial connection to the GPS module."""
+    try:
+        gps_serial = serial.Serial(port, baud, timeout=0.5)
+        print(f"GPS serial port {port} opened successfully.")
+        return gps_serial
+    except serial.SerialException as e:
+        print(f"Error: Could not open serial port {port}: {e}")
+        raise
 
-with serial.Serial(GPS_PORT, GPS_BAUD, timeout=1) as ser, open(csv_file, "w", newline="") as f:
-    writer = csv.writer(f)
-    # Write headers
-    writer.writerow(["UTC Time", "Latitude", "N/S", "Longitude", "E/W", "Speed(knots)", "Course(deg)", "Date", "Valid"])
 
-    print(f"Logging GPS data to {csv_file}... (Ctrl+C to stop)")
+def _parse_lat_lon(coord_str, direction):
+    """
+    Parses a NMEA coordinate string (DDMM.MMMM) into decimal degrees.
+    """
+    if not coord_str:
+        return None
 
     try:
-        while True:
-            line = ser.readline().decode("ascii", errors="ignore").strip()
+        # Get the degrees part
+        degrees = float(coord_str[:2]) if len(coord_str) > 2 else float(coord_str)
+        # Get the minutes part
+        minutes = float(coord_str[2:]) if len(coord_str) > 2 else 0.0
+
+        # Calculate decimal degrees
+        decimal_degrees = degrees + (minutes / 60.0)
+
+        # Apply direction (S or W are negative)
+        if direction in ['S', 'W']:
+            decimal_degrees *= -1
+
+        return decimal_degrees
+    except (ValueError, IndexError):
+        return None
+
+
+def get_gps_data(gps_serial):
+    """
+    Reads the GPS serial port, finds a valid $GPRMC sentence, and returns
+    parsed data.
+
+    Returns:
+        A tuple (latitude, longitude, speed_kmh) or (None, None, None) if
+        no valid data is found.
+    """
+    try:
+        # Try reading a few lines to find a valid one
+        for _ in range(5):
+            line = gps_serial.readline().decode("ascii", errors="ignore").strip()
+
             if line.startswith("$GPRMC"):
                 parts = line.split(",")
-                # GPRMC fields
-                utc_time = parts[1]
-                valid = parts[2]
-                latitude = parts[3]
-                ns = parts[4]
-                longitude = parts[5]
-                ew = parts[6]
-                speed = parts[7]
-                course = parts[8]
-                date = parts[9]
+                # Check for basic validity: enough parts and 'A' status
+                if len(parts) > 9 and parts[2] == 'A':
+                    lat_raw = parts[3]
+                    lat_dir = parts[4]
+                    lon_raw = parts[5]
+                    lon_dir = parts[6]
+                    speed_knots = parts[7]
 
-                # Print to terminal
-                print(f"{utc_time} {latitude}{ns} {longitude}{ew} {speed}kn {course}deg Valid:{valid}")
+                    # Parse coordinates and speed
+                    latitude = _parse_lat_lon(lat_raw, lat_dir)
+                    longitude = _parse_lat_lon(lon_raw, lon_dir)
+                    speed_kmh = float(speed_knots) * KNOTS_TO_KMH if speed_knots else 0.0
 
-                # Save to CSV
-                writer.writerow([utc_time, latitude, ns, longitude, ew, speed, course, date, valid])
-                f.flush()
-    except KeyboardInterrupt:
-        print("\nStopped logging.")
+                    if latitude is not None and longitude is not None:
+                        # Return the first valid data found
+                        return (latitude, longitude, speed_kmh)
+
+        # If no valid $GPRMC sentence was found after trying
+        return (None, None, None)
+
+    except (serial.SerialException, ValueError, IndexError) as e:
+        print(f"Error reading or parsing GPS data: {e}")
+        return (None, None, None)
