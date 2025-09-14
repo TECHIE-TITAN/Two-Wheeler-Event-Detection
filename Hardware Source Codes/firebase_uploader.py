@@ -1,6 +1,6 @@
 import time
 import requests
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 DB_URL = "https://wheeler-event-detection-default-rtdb.asia-southeast1.firebasedatabase.app"
 _API_KEY = "AIzaSyA__tMBGiQ-PVqyvv9kvNHaSUJk2QPXU-c"
@@ -136,3 +136,65 @@ def init_ride(user_id: str, start_timestamp_ms: int) -> bool:
 
 def init_auth():
     _sign_in_email_password()
+
+
+# ---- Control flags (Realtime Database) ----
+def _ride_status_url(user_id: str, prefer_top_level: bool = True) -> str:
+    # Prefer top-level path: /{user_id}/ride_control/ride_status
+    # Fallback used by existing writers is /users/{user_id}/...
+    if prefer_top_level:
+        return f"{DB_URL}/{user_id}/ride_control/ride_status.json?auth={_current_auth_token()}"
+    return f"{DB_URL}/users/{user_id}/rider_control/ride_status.json?auth={_current_auth_token()}"
+
+
+def get_control_flags(user_id: str) -> Tuple[bool, bool]:
+    """
+    Returns (is_active, calculate_model) from Realtime DB.
+    Tries top-level path first, then falls back to /users path.
+    """
+    try:
+        # Try top-level
+        resp = requests.get(_ride_status_url(user_id, True), timeout=5)
+        if resp.status_code == 200:
+            js = resp.json() or {}
+            is_active = bool(js.get("is_active", False))
+            calculate_model = bool(js.get("calculate_model", False))
+            return is_active, calculate_model
+    except Exception as e:
+        print(f"Firebase get_control_flags (top-level) exception: {e}")
+
+    try:
+        # Fallback to /users
+        resp = requests.get(_ride_status_url(user_id, False), timeout=5)
+        if resp.status_code == 200:
+            js = resp.json() or {}
+            is_active = bool(js.get("is_active", False))
+            calculate_model = bool(js.get("calculate_model", False))
+            return is_active, calculate_model
+    except Exception as e:
+        print(f"Firebase get_control_flags (/users) exception: {e}")
+
+    return False, False
+
+
+def set_control_flag(user_id: str, field: str, value: bool) -> bool:
+    """Sets a boolean field under ride_status, trying top-level first then /users."""
+    payload = {field: bool(value)}
+    try:
+        r = requests.patch(_ride_status_url(user_id, True), json=payload, timeout=5)
+        if r.status_code == 200:
+            return True
+    except Exception as e:
+        print(f"Firebase set_control_flag (top-level) exception: {e}")
+
+    try:
+        r = requests.patch(_ride_status_url(user_id, False), json=payload, timeout=5)
+        return r.status_code == 200
+    except Exception as e:
+        print(f"Firebase set_control_flag (/users) exception: {e}")
+        return False
+
+
+def toggle_calculate_model_off(user_id: str) -> bool:
+    """Convenience helper to set calculate_model back to False."""
+    return set_control_flag(user_id, "calculate_model", False)

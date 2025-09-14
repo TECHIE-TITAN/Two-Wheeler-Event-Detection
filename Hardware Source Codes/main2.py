@@ -13,7 +13,8 @@ SAMPLE_INTERVAL = 1.0 / TARGET_HZ
 OLA_MAPS_API_KEY = "50c25aHLICdWQ4JbXp2MZwgmliGxvqJ8os1MOYe3"
 SPEED_LIMIT_REFRESH_S = 1.0  
 FIREBASE_PUSH_INTERVAL_S = 1.0
-USER_ID = "test_user_123"
+USER_ID = "test_use_123"
+CONTROL_POLL_INTERVAL_S = 0.5
 
 IMAGE_DIR = "captured_images/"
 
@@ -23,6 +24,19 @@ latest_gps = (None, None, None)
 latest_speed_limit = None
 last_speed_limit_fetch = 0.0
 stop_event = threading.Event()
+last_control_poll = 0.0
+prev_calc_model = False
+current_is_active = False
+current_calc_model = False
+
+
+def model_calculation():
+    """Placeholder for model calculation logic.
+    Replace with actual implementation if available elsewhere.
+    """
+    print("Running model_calculation() ...")
+    # Simulate brief computation
+    time.sleep(0.5)
 
 
 def mpu_thread():
@@ -125,6 +139,38 @@ def main():
                     gps = latest_gps
 
                 lat, lon, spd = gps
+
+                # Poll Firebase control flags periodically
+                global last_control_poll, prev_calc_model, current_is_active, current_calc_model
+                t_wall = time.time()
+                if (t_wall - last_control_poll) >= CONTROL_POLL_INTERVAL_S:
+                    try:
+                        is_active, calc_model = firebase_uploader.get_control_flags(USER_ID)
+                    except Exception as _:
+                        is_active, calc_model = current_is_active, current_calc_model
+                    last_control_poll = t_wall
+
+                    # Edge-trigger for calculate_model -> True
+                    if calc_model and not prev_calc_model:
+                        try:
+                            # Stop active loop after calculation by flipping is_active to False
+                            model_calculation()
+                        finally:
+                            firebase_uploader.toggle_calculate_model_off(USER_ID)
+                            # Force pause: require remote to set is_active True again
+                            try:
+                                firebase_uploader.set_control_flag(USER_ID, "is_active", False)
+                            except Exception as _:
+                                pass
+                    prev_calc_model = calc_model
+                    current_is_active = is_active
+                    current_calc_model = calc_model
+
+                # If not active, skip sampling/pushing but keep polling
+                if not current_is_active:
+                    # Small idle sleep to reduce CPU when inactive
+                    time.sleep(0.2)
+                    continue
 
                 if lat is not None and lon is not None:
                     t_now = time.time()
