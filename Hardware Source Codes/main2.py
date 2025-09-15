@@ -13,10 +13,11 @@ SAMPLE_INTERVAL = 1.0 / TARGET_HZ
 OLA_MAPS_API_KEY = "50c25aHLICdWQ4JbXp2MZwgmliGxvqJ8os1MOYe3"
 SPEED_LIMIT_REFRESH_S = 1.0  
 FIREBASE_PUSH_INTERVAL_S = 1.0
-USER_ID = "test_use_123"
+USER_ID = "WlDdtoNgVNc3pEEHzWkKthuTLXF2"
 CONTROL_POLL_INTERVAL_S = 0.5
 
 IMAGE_DIR = "captured_images/"
+CSV_FILENAME = "sensor_data.csv"
 
 data_lock = threading.Lock()
 latest_mpu = (None, None, None, None, None, None)
@@ -31,12 +32,37 @@ current_calc_model = False
 
 
 def model_calculation():
-    """Placeholder for model calculation logic.
-    Replace with actual implementation if available elsewhere.
+    """Read the entire CSV and upload as JSON to Firebase ride_data.
+    After successful upload, calculate_model will be toggled false by caller.
     """
-    print("Running model_calculation() ...")
-    # Simulate brief computation
-    time.sleep(0.5)
+    print("Running model_calculation(): uploading CSV to Firebase ...")
+    rows = []
+    try:
+        if not os.path.exists(CSV_FILENAME):
+            print(f"CSV file not found: {CSV_FILENAME}")
+            return
+        with open(CSV_FILENAME, "r", newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                # Optionally upload associated image and replace with a DB reference
+                img_path = row.get("image_path")
+                if img_path:
+                    ref = firebase_uploader.upload_ride_image_base64(USER_ID, img_path)
+                    if ref:
+                        row["image_db_ref"] = ref
+                rows.append(row)
+    except Exception as e:
+        print(f"Error reading CSV for model_calculation: {e}")
+        return
+
+    try:
+        ok = firebase_uploader.upload_ride_data(USER_ID, rows)
+        if ok:
+            print(f"Uploaded {len(rows)} rows to Firebase ride_data.")
+        else:
+            print("Failed to upload ride_data to Firebase.")
+    except Exception as e:
+        print(f"Firebase upload during model_calculation failed: {e}")
 
 
 def mpu_thread():
@@ -112,7 +138,7 @@ def main():
         print(f"Firebase ride init failed: {e}")
 
     # Prepare CSV
-    csv_filename = "sensor_data.csv"
+    csv_filename = CSV_FILENAME
     fieldnames = [
         'timestamp', 'image_path', 'acc_x', 'acc_y', 'acc_z', 'gyro_x', 'gyro_y', 'gyro_z',
         'latitude', 'longitude', 'speed', 'speed_limit'

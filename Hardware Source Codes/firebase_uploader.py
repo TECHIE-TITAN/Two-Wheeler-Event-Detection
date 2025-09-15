@@ -1,4 +1,6 @@
 import time
+import os
+import base64
 import requests
 from typing import Dict, Optional, Tuple
 
@@ -6,7 +8,7 @@ DB_URL = "https://wheeler-event-detection-default-rtdb.asia-southeast1.firebased
 _API_KEY = "AIzaSyA__tMBGiQ-PVqyvv9kvNHaSUJk2QPXU-c"
 _EMAIL = "rpi@example.com"
 _PASSWORD = "rpi123456"
-DEFAULT_USER_ID = "test_user_123"
+DEFAULT_USER_ID = "WlDdtoNgVNc3pEEHzWkKthuTLXF2"
 
 # Auth state
 _ID_TOKEN: Optional[str] = None
@@ -198,3 +200,49 @@ def set_control_flag(user_id: str, field: str, value: bool) -> bool:
 def toggle_calculate_model_off(user_id: str) -> bool:
     """Convenience helper to set calculate_model back to False."""
     return set_control_flag(user_id, "calculate_model", False)
+
+
+def upload_ride_data(user_id: str, ride_rows: list) -> bool:
+    """Uploads the entire ride CSV (as JSON list of rows) under /users/{user_id}/ride_data.
+
+    This uses PUT to replace the existing value.
+    """
+    url = f"{DB_URL}/users/{user_id}/ride_data.json?auth={_current_auth_token()}"
+    try:
+        r = requests.put(url, json=ride_rows, timeout=15)
+        return r.status_code in (200, 204)
+    except Exception as e:
+        print(f"Firebase upload_ride_data exception: {e}")
+        return False
+
+
+def upload_ride_image_base64(user_id: str, file_path: str, content_type: str = "image/jpeg") -> Optional[str]:
+    """Uploads an image as base64 into Realtime DB under /users/{user_id}/ride_images/.
+
+    Returns the database ref path string on success, else None.
+    """
+    try:
+        if not os.path.exists(file_path):
+            print(f"Image not found: {file_path}")
+            return None
+        with open(file_path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode("ascii")
+        ts_ms = int(time.time() * 1000)
+        key = os.path.splitext(os.path.basename(file_path))[0] or f"img_{ts_ms}"
+        # Ensure key is Firebase-safe
+        key = key.replace('.', '_')
+        url = f"{DB_URL}/users/{user_id}/ride_images/{key}.json?auth={_current_auth_token()}"
+        payload = {
+            "filename": os.path.basename(file_path),
+            "content_type": content_type,
+            "uploaded_at": ts_ms,
+            "data_base64": b64
+        }
+        r = requests.put(url, json=payload, timeout=20)
+        if r.status_code in (200, 204):
+            return f"users/{user_id}/ride_images/{key}"
+        print(f"Image upload failed ({r.status_code}): {r.text[:200]}")
+        return None
+    except Exception as e:
+        print(f"Firebase upload_ride_image_base64 exception: {e}")
+        return None
