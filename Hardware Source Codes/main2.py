@@ -44,12 +44,27 @@ def model_calculation(ride_id: str):
         with open(CSV_FILENAME, "r", newline="") as f:
             reader = csv.DictReader(f)
             for row in reader:
+                # Normalize timestamp to integer ms string
+                ts_val = row.get("timestamp")
+                try:
+                    # If timestamp was a float string, convert to ms int
+                    ts_float = float(ts_val)
+                    ts_ms = int(ts_float * 1000) if ts_float < 1e12 else int(ts_float)
+                except Exception:
+                    ts_ms = int(time.time() * 1000)
+                row["timestamp"] = str(ts_ms)
+
                 # Optionally upload associated image and replace with a DB reference
                 img_path = row.get("image_path")
                 if img_path:
-                    ref = firebase_uploader.upload_ride_image_base64(USER_ID, img_path)
+                    # Use normalized timestamp as key for the image under the ride
+                    ts_key = row.get("timestamp") or str(int(time.time() * 1000))
+                    ref = firebase_uploader.upload_ride_image_base64_for_ride(USER_ID, ride_id, ts_key, img_path)
                     if ref:
+                        # include DB ref and also embed a small pointer under the row
                         row["image_db_ref"] = ref
+                        # also store the base64 under ride_data keyed by timestamp
+                        row["base64"] = "(stored under ride_images_base64)"
                 rows.append(row)
     except Exception as e:
         print(f"Error reading CSV for model_calculation: {e}")
@@ -210,7 +225,7 @@ def main():
                 img_path = get_latest_image_for_timestamp(target_timestamp_ms)
 
                 row = {
-                    'timestamp': time.time(),
+                    'timestamp': target_timestamp_ms,
                     'image_path': img_path or '',
                     'acc_x': mpu[0], 'acc_y': mpu[1], 'acc_z': mpu[2],
                     'gyro_x': mpu[3], 'gyro_y': mpu[4], 'gyro_z': mpu[5],

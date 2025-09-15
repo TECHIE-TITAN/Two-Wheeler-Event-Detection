@@ -8,7 +8,7 @@ DB_URL = "https://wheeler-event-detection-default-rtdb.asia-southeast1.firebased
 _API_KEY = "AIzaSyA__tMBGiQ-PVqyvv9kvNHaSUJk2QPXU-c"
 _EMAIL = "rpi@example.com"
 _PASSWORD = "rpi123456"
-DEFAULT_USER_ID = "WlDdtoNgVNc3pEEHzWkKthuTLXF2"
+DEFAULT_USER_ID = "abSdkSyZuxdmryk4jnlMqfwl49n2"
 
 # Auth state
 _ID_TOKEN: Optional[str] = None
@@ -279,7 +279,7 @@ def upload_ride_data_for_ride(user_id: str, ride_id: Optional[str], ride_rows: l
         return False
 
 
-def upload_ride_image_base64(user_id: str, file_path: str, content_type: str = "image/jpeg") -> Optional[str]:
+def upload_ride_image_base64(user_id: str, file_path: str, content_type: str = "image/jpeg", ride_id: Optional[str] = None) -> Optional[str]:
     """Uploads an image as base64 into Realtime DB under /users/{user_id}/ride_images/.
 
     Returns the database ref path string on success, else None.
@@ -292,10 +292,15 @@ def upload_ride_image_base64(user_id: str, file_path: str, content_type: str = "
             b64 = base64.b64encode(f.read()).decode("ascii")
 
         ts_ms = int(time.time() * 1000)
-        key = os.path.splitext(os.path.basename(file_path))[0] or f"img_{ts_ms}"
-        # Ensure key is Firebase-safe
-        key = key.replace('.', '_')
-        url = f"{DB_URL}/users/{user_id}/ride_images/{key}.json?auth={_current_auth_token()}"
+        # Use timestamp as key when ride-scoped to map image by timestamp
+        if ride_id:
+            # Delegate to the ride-scoped uploader which stores under `ride_images_base64`.
+            return upload_ride_image_base64_for_ride(user_id, ride_id, str(ts_ms), file_path, content_type)
+        else:
+            key = os.path.splitext(os.path.basename(file_path))[0] or f"img_{ts_ms}"
+            # Ensure key is Firebase-safe
+            key = key.replace('.', '_')
+            url = f"{DB_URL}/users/{user_id}/ride_images/{key}.json?auth={_current_auth_token()}"
         payload = {
             "filename": os.path.basename(file_path),
             "content_type": content_type,
@@ -309,4 +314,36 @@ def upload_ride_image_base64(user_id: str, file_path: str, content_type: str = "
         return None
     except Exception as e:
         print(f"Firebase upload_ride_image_base64 exception: {e}")
+        return None
+
+def upload_ride_image_base64_for_ride(user_id: str, ride_id: str, timestamp_key: str, file_path: str, content_type: str = "image/jpeg") -> Optional[str]:
+    """Uploads an image's base64 under a specific ride at
+    `/users/{user_id}/rides/{ride_id}/ride_images_base64/{timestamp_key}`.
+
+    The stored value is an object with `content_type`, `uploaded_at`, and `data_base64`.
+    Returns the DB path on success.
+    """
+    try:
+        if not os.path.exists(file_path):
+            print(f"Image not found: {file_path}")
+            return None
+        with open(file_path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode("ascii")
+
+        ts_ms = int(time.time() * 1000)
+        # sanitize timestamp_key to be Firebase-key-safe
+        key = str(timestamp_key).replace('.', '_')
+        url = f"{DB_URL}/users/{user_id}/rides/{ride_id}/ride_images_base64/{key}.json?auth={_current_auth_token()}"
+        payload = {
+            "content_type": content_type,
+            "uploaded_at": ts_ms,
+            "data_base64": b64
+        }
+        r = requests.put(url, json=payload, timeout=30)
+        if r.status_code in (200, 204):
+            return f"users/{user_id}/rides/{ride_id}/ride_images_base64/{key}"
+        print(f"Ride image upload failed ({r.status_code}): {r.text[:200]}")
+        return None
+    except Exception as e:
+        print(f"Firebase upload_ride_image_base64_for_ride exception: {e}")
         return None
