@@ -122,17 +122,35 @@ def update_rider_mpu(
 
 
 def init_ride(user_id: str, start_timestamp_ms: int) -> bool:
+    # Legacy init_ride writes to the non-ride-scoped location. Keep for
+    # backward compatibility; prefer using init_ride_for_ride with ride_id.
     url = f"{DB_URL}/users/{user_id}/rider_control/ride_status.json?auth={_current_auth_token()}"
     payload = {
         "is_active": True,
         "start_timestamp": start_timestamp_ms,
-        "end_ride_signal": False
+        "calculate_model": False
     }
     try:
         response = requests.patch(url, json=payload, timeout=5)
         return response.status_code == 200
     except Exception as e:
         print(f"Firebase ride init exception: {e}")
+        return False
+
+
+def init_ride_for_ride(user_id: str, ride_id: str, start_timestamp_ms: int) -> bool:
+    """Initialize ride control status under a rides/{ride_id} path."""
+    url = f"{DB_URL}/users/{user_id}/rides/{ride_id}/rider_control/ride_status.json?auth={_current_auth_token()}"
+    payload = {
+        "is_active": True,
+        "start_timestamp": start_timestamp_ms,
+        "calculate_model": False
+    }
+    try:
+        response = requests.patch(url, json=payload, timeout=5)
+        return response.status_code == 200
+    except Exception as e:
+        print(f"Firebase init_ride_for_ride exception: {e}")
         return False
 
 
@@ -154,60 +172,105 @@ def get_control_flags(user_id: str) -> Tuple[bool, bool]:
     Returns (is_active, calculate_model) from Realtime DB.
     Tries top-level path first, then falls back to /users path.
     """
+    # This legacy function remains but we now route through the more general
+    # ride-scoped helper below. Keep for backward compatibility.
+    return get_control_flags_for_ride(user_id, None)
+
+
+def get_control_flags_for_ride(user_id: str, ride_id: Optional[str]) -> Tuple[bool, bool]:
+    """Returns (is_active, calculate_model) for a given ride_id.
+    If ride_id is None, falls back to the top-level control locations.
+    """
     try:
-        # Try top-level
+        if ride_id:
+            url = f"{DB_URL}/users/{user_id}/rides/{ride_id}/rider_control/ride_status.json?auth={_current_auth_token()}"
+            resp = requests.get(url, timeout=5)
+            if resp.status_code == 200:
+                js = resp.json() or {}
+                return bool(js.get("is_active", False)), bool(js.get("calculate_model", False))
+        # Try top-level locations (preferred path and fallback)
         resp = requests.get(_ride_status_url(user_id, True), timeout=5)
         if resp.status_code == 200:
             js = resp.json() or {}
-            is_active = bool(js.get("is_active", False))
-            calculate_model = bool(js.get("calculate_model", False))
-            return is_active, calculate_model
+            return bool(js.get("is_active", False)), bool(js.get("calculate_model", False))
     except Exception as e:
-        print(f"Firebase get_control_flags (top-level) exception: {e}")
+        print(f"Firebase get_control_flags_for_ride exception: {e}")
 
     try:
-        # Fallback to /users
         resp = requests.get(_ride_status_url(user_id, False), timeout=5)
         if resp.status_code == 200:
             js = resp.json() or {}
-            is_active = bool(js.get("is_active", False))
-            calculate_model = bool(js.get("calculate_model", False))
-            return is_active, calculate_model
+            return bool(js.get("is_active", False)), bool(js.get("calculate_model", False))
     except Exception as e:
-        print(f"Firebase get_control_flags (/users) exception: {e}")
+        print(f"Firebase get_control_flags_for_ride fallback exception: {e}")
 
     return False, False
 
 
-def set_control_flag(user_id: str, field: str, value: bool) -> bool:
-    """Sets a boolean field under ride_status, trying top-level first then /users."""
+def get_next_ride_id(user_id: str) -> str:
+    """Return the next integer ride id as a string.
+
+    If no rides exist, returns "0". Otherwise returns str(max_id+1).
+    """
+    try:
+        url = f"{DB_URL}/users/{user_id}/rides.json?auth={_current_auth_token()}"
+        resp = requests.get(url, timeout=8)
+        if resp.status_code != 200:
+            return "0"
+        js = resp.json() or {}
+        numeric_ids = [int(k) for k in js.keys() if k.isdigit()]
+        if not numeric_ids:
+            return "0"
+        return str(max(numeric_ids) + 1)
+    except Exception as e:
+        print(f"Firebase get_next_ride_id exception: {e}")
+        return "0"
+
+
+def set_control_flag(user_id: str, field: str, value: bool, ride_id: Optional[str] = None) -> bool:
+    """Sets a boolean field under ride_status for a ride if ride_id provided,
+    otherwise tries the legacy top-level paths.
+    """
     payload = {field: bool(value)}
     try:
+        if ride_id:
+            url = f"{DB_URL}/users/{user_id}/rides/{ride_id}/rider_control/ride_status.json?auth={_current_auth_token()}"
+            r = requests.patch(url, json=payload, timeout=5)
+            return r.status_code == 200
         r = requests.patch(_ride_status_url(user_id, True), json=payload, timeout=5)
         if r.status_code == 200:
             return True
     except Exception as e:
-        print(f"Firebase set_control_flag (top-level) exception: {e}")
+        print(f"Firebase set_control_flag (primary) exception: {e}")
 
     try:
         r = requests.patch(_ride_status_url(user_id, False), json=payload, timeout=5)
         return r.status_code == 200
     except Exception as e:
-        print(f"Firebase set_control_flag (/users) exception: {e}")
+        print(f"Firebase set_control_flag (fallback) exception: {e}")
         return False
 
 
-def toggle_calculate_model_off(user_id: str) -> bool:
-    """Convenience helper to set calculate_model back to False."""
-    return set_control_flag(user_id, "calculate_model", False)
+def toggle_calculate_model_off(user_id: str, ride_id: Optional[str] = None) -> bool:
+    """Convenience helper to set calculate_model back to False for a ride or legacy path."""
+    return set_control_flag(user_id, "calculate_model", False, ride_id=ride_id)
 
 
 def upload_ride_data(user_id: str, ride_rows: list) -> bool:
-    """Uploads the entire ride CSV (as JSON list of rows) under /users/{user_id}/ride_data.
+    """Uploads the entire ride CSV (as JSON list of rows).
 
-    This uses PUT to replace the existing value.
+    If ride_rows belong to a specific ride, pass a `ride_id` and the data
+    will be stored at `/users/{user_id}/rides/{ride_id}/ride_data`.
     """
-    url = f"{DB_URL}/users/{user_id}/ride_data.json?auth={_current_auth_token()}"
+    # Backward compatible single-arg signature (no ride_id) expects ride_rows only
+    return upload_ride_data_for_ride(user_id, None, ride_rows)
+
+
+def upload_ride_data_for_ride(user_id: str, ride_id: Optional[str], ride_rows: list) -> bool:
+    if ride_id:
+        url = f"{DB_URL}/users/{user_id}/rides/{ride_id}/ride_data.json?auth={_current_auth_token()}"
+    else:
+        url = f"{DB_URL}/users/{user_id}/ride_data.json?auth={_current_auth_token()}"
     try:
         r = requests.put(url, json=ride_rows, timeout=15)
         return r.status_code in (200, 204)
@@ -227,6 +290,7 @@ def upload_ride_image_base64(user_id: str, file_path: str, content_type: str = "
             return None
         with open(file_path, "rb") as f:
             b64 = base64.b64encode(f.read()).decode("ascii")
+
         ts_ms = int(time.time() * 1000)
         key = os.path.splitext(os.path.basename(file_path))[0] or f"img_{ts_ms}"
         # Ensure key is Firebase-safe

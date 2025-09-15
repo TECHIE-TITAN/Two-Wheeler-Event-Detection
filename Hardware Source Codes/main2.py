@@ -31,7 +31,7 @@ current_is_active = False
 current_calc_model = False
 
 
-def model_calculation():
+def model_calculation(ride_id: str):
     """Read the entire CSV and upload as JSON to Firebase ride_data.
     After successful upload, calculate_model will be toggled false by caller.
     """
@@ -56,7 +56,7 @@ def model_calculation():
         return
 
     try:
-        ok = firebase_uploader.upload_ride_data(USER_ID, rows)
+        ok = firebase_uploader.upload_ride_data_for_ride(USER_ID, ride_id, rows)
         if ok:
             print(f"Uploaded {len(rows)} rows to Firebase ride_data.")
         else:
@@ -131,9 +131,11 @@ def main():
     for t in threads:
         t.start()
 
-    # Initialize Firebase ride
+    # Determine ride id (auto-increment) and initialize ride-scoped control
     try:
-        firebase_uploader.init_ride(USER_ID, int(time.time() * 1000))
+        ride_id = firebase_uploader.get_next_ride_id(USER_ID)
+        print(f"Starting ride id: {ride_id}")
+        firebase_uploader.init_ride_for_ride(USER_ID, ride_id, int(time.time() * 1000))
     except Exception as e:
         print(f"Firebase ride init failed: {e}")
 
@@ -171,7 +173,7 @@ def main():
                 t_wall = time.time()
                 if (t_wall - last_control_poll) >= CONTROL_POLL_INTERVAL_S:
                     try:
-                        is_active, calc_model = firebase_uploader.get_control_flags(USER_ID)
+                        is_active, calc_model = firebase_uploader.get_control_flags_for_ride(USER_ID, ride_id)
                     except Exception as _:
                         is_active, calc_model = current_is_active, current_calc_model
                     last_control_poll = t_wall
@@ -180,12 +182,12 @@ def main():
                     if calc_model and not prev_calc_model:
                         try:
                             # Stop active loop after calculation by flipping is_active to False
-                            model_calculation()
+                            model_calculation(ride_id)
                         finally:
-                            firebase_uploader.toggle_calculate_model_off(USER_ID)
+                            firebase_uploader.toggle_calculate_model_off(USER_ID, ride_id=ride_id)
                             # Force pause: require remote to set is_active True again
                             try:
-                                firebase_uploader.set_control_flag(USER_ID, "is_active", False)
+                                firebase_uploader.set_control_flag(USER_ID, "is_active", False, ride_id=ride_id)
                             except Exception as _:
                                 pass
                     prev_calc_model = calc_model
