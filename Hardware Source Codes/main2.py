@@ -30,6 +30,11 @@ prev_calc_model = False
 current_is_active = False
 current_calc_model = False
 
+# Speed calculation buffers and state
+accel_buffer = []  # Buffer to store 1 second of acceleration data (30 samples)
+current_speed_ms = 0.0  # Current speed in m/s
+speed_calculation_lock = threading.Lock()
+
 
 def model_calculation(ride_id: str):
     """Read the entire CSV and upload as JSON to Firebase ride_data.
@@ -45,12 +50,96 @@ def model_calculation(ride_id: str):
     return
 
 
+def add_accel_to_buffer(acc_x):
+    """Add acceleration data to buffer and maintain 1-second window (30 samples)"""
+    global accel_buffer
+    with speed_calculation_lock:
+        # Convert from g to m/s² (assuming acc_x is in g units)
+        accel_ms2 = acc_x * 9.81 if acc_x is not None else 0.0
+        
+        accel_buffer.append(accel_ms2)
+        
+        # Keep only last 30 samples (1 second at 30Hz)
+        if len(accel_buffer) > TARGET_HZ:
+            accel_buffer = accel_buffer[-TARGET_HZ:]
+
+
+def calculate_speed_from_accel():
+    """Calculate speed using average acceleration over 1 second and v = u + at"""
+    global current_speed_ms, accel_buffer
+    
+    with speed_calculation_lock:
+        if len(accel_buffer) == 0:
+            return current_speed_ms
+        
+        # Calculate average acceleration over the buffer period
+        avg_accel_ms2 = sum(accel_buffer) / len(accel_buffer)
+        
+        # Apply deadband to filter out noise (ignore very small accelerations)
+        deadband_threshold = 0.2  # m/s² - adjust based on sensor noise
+        if abs(avg_accel_ms2) < deadband_threshold:
+            avg_accel_ms2 = 0.0
+        
+        # Time period: buffer size / sampling rate
+        time_period = len(accel_buffer) / TARGET_HZ  # seconds
+        
+        # Apply kinematic equation: v = u + at
+        new_speed_ms = current_speed_ms + (avg_accel_ms2 * time_period)
+        
+        # Ensure speed doesn't go negative
+        new_speed_ms = max(0.0, new_speed_ms)
+        
+        # Apply reasonable speed limits (max ~200 km/h = ~55.6 m/s)
+        new_speed_ms = min(55.6, new_speed_ms)
+        
+        current_speed_ms = new_speed_ms
+        
+        return current_speed_ms
+
+
+def get_final_speed_kmh():
+    """
+    Get final speed in km/h using priority system:
+    1. GPS speed (if available)
+    2. Accelerometer-based calculation (fallback)
+    """
+    global latest_gps, current_speed_ms
+    
+    with data_lock:
+        gps_data = latest_gps
+    
+    # Extract GPS speed (assuming it's in km/h)
+    gps_speed_kmh = None
+    if gps_data and len(gps_data) >= 3 and gps_data[2] is not None:
+        gps_speed_kmh = gps_data[2]
+        
+        # Validate GPS speed (reasonable range)
+        if gps_speed_kmh < 0 or gps_speed_kmh > 300:  # 300 km/h max
+            gps_speed_kmh = None
+    
+    if gps_speed_kmh is not None:
+        # Use GPS speed and sync our accelerometer-based speed to it
+        with speed_calculation_lock:
+            current_speed_ms = gps_speed_kmh / 3.6  # Convert km/h to m/s
+        return gps_speed_kmh, "GPS"
+    else:
+        # Use accelerometer-based speed calculation
+        accel_speed_ms = calculate_speed_from_accel()
+        accel_speed_kmh = accel_speed_ms * 3.6  # Convert m/s to km/h
+        return accel_speed_kmh, "ACCEL"
+
+
 def mpu_thread():
     global latest_mpu
     while not stop_event.is_set():
         data = mpu_utils.get_mpu_data()
         with data_lock:
             latest_mpu = data
+        
+        # Add acceleration data to buffer for speed calculation
+        if data and len(data) >= 1 and data[0] is not None:
+            add_accel_to_buffer(data[0])  # Use acc_x for speed calculation
+            
         time.sleep(0.005)
 
 
@@ -194,6 +283,12 @@ def main():
 
                 lat, lon, spd = gps
 
+                # Calculate final speed using our priority system
+                final_speed_kmh, speed_source = get_final_speed_kmh()
+                
+                # Use the final calculated speed instead of raw GPS speed
+                spd = final_speed_kmh
+
                 # Poll Firebase control flags periodically
                 global last_control_poll, prev_calc_model, current_is_active, current_calc_model
                 t_wall = time.time()
@@ -230,12 +325,18 @@ def main():
                 if lat is not None and lon is not None:
                     # Print GPS status every 30 seconds
                     if int(time.time()) % 30 == 0 and int(time.time() * 10) % 10 == 0:  # Once per 30s
-                        print(f"GPS Status: Lat={lat:.6f}, Lon={lon:.6f}, Speed={spd:.2f} km/h")
+                        print(f"GPS Status: Lat={lat:.6f}, Lon={lon:.6f}, Speed={spd:.2f} km/h ({speed_source})")
                     
                     t_now = time.time()
                     if (latest_speed_limit is None) or (t_now - last_speed_limit_fetch >= SPEED_LIMIT_REFRESH_S):
                         latest_speed_limit = speed_limit_utils.get_speed_limit(lat, lon, OLA_MAPS_API_KEY)
                         last_speed_limit_fetch = t_now
+                else:
+                    # Print accelerometer-only speed calculation status periodically  
+                    if int(time.time()) % 30 == 0 and int(time.time() * 10) % 10 == 0:  # Once per 30s
+                        print(f"No GPS - Speed: {spd:.2f} km/h ({speed_source})")
+                        with speed_calculation_lock:
+                            print(f"Accel buffer size: {len(accel_buffer)} samples")
 
                 target_timestamp_ms = int(time.time() * 1000)
                 img_path = get_latest_image_for_timestamp(target_timestamp_ms)
