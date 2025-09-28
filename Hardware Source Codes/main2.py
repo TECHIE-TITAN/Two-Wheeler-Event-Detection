@@ -34,6 +34,8 @@ current_calc_model = False
 accel_buffer = []  # Buffer to store 1 second of acceleration data (30 samples)
 current_speed_ms = 0.0  # Current speed in m/s
 speed_calculation_lock = threading.Lock()
+gps_last_update_time = 0.0  # Track when GPS was last successfully updated
+GPS_TIMEOUT_SECONDS = 5.0  # Consider GPS stale after 5 seconds without update
 
 
 def model_calculation(ride_id: str):
@@ -100,17 +102,23 @@ def calculate_speed_from_accel():
 def get_final_speed_kmh():
     """
     Get final speed in km/h using priority system:
-    1. GPS speed (if available)
+    1. GPS speed (if available and fresh)
     2. Accelerometer-based calculation (fallback)
     """
-    global latest_gps, current_speed_ms
+    global latest_gps, current_speed_ms, gps_last_update_time
+    
+    current_time = time.time()
     
     with data_lock:
         gps_data = latest_gps
+        last_gps_update = gps_last_update_time
+    
+    # Check if GPS data is stale
+    gps_is_stale = (current_time - last_gps_update) > GPS_TIMEOUT_SECONDS
     
     # Extract GPS speed (assuming it's in km/h)
     gps_speed_kmh = None
-    if gps_data and len(gps_data) >= 3 and gps_data[2] is not None:
+    if gps_data and len(gps_data) >= 3 and gps_data[2] is not None and not gps_is_stale:
         gps_speed_kmh = gps_data[2]
         
         # Validate GPS speed (reasonable range)
@@ -126,7 +134,12 @@ def get_final_speed_kmh():
         # Use accelerometer-based speed calculation
         accel_speed_ms = calculate_speed_from_accel()
         accel_speed_kmh = accel_speed_ms * 3.6  # Convert m/s to km/h
-        return accel_speed_kmh, "ACCEL"
+        
+        # Indicate why accelerometer is being used
+        if gps_is_stale and gps_data != (None, None, None):
+            return accel_speed_kmh, "ACCEL (GPS_STALE)"
+        else:
+            return accel_speed_kmh, "ACCEL"
 
 
 def mpu_thread():
@@ -144,10 +157,12 @@ def mpu_thread():
 
 
 def gps_thread(gps_serial):
-    global latest_gps
+    global latest_gps, gps_last_update_time
     last_valid_gps_time = 0
     gps_read_count = 0
     valid_gps_count = 0
+    consecutive_errors = 0
+    max_consecutive_errors = 5  # Reset GPS data after 5 consecutive errors
     
     print("GPS thread started...")
     
@@ -159,18 +174,25 @@ def gps_thread(gps_serial):
             if gps_data and gps_data != (None, None, None):
                 valid_gps_count += 1
                 last_valid_gps_time = time.time()
+                consecutive_errors = 0  # Reset error counter on successful read
                 
                 with data_lock:
                     if len(gps_data) == 3:
                         latest_gps = gps_data
+                        gps_last_update_time = time.time()  # Update GPS timestamp
                     else:
                         latest_gps = (gps_data[0], gps_data[1], None)
+                        gps_last_update_time = time.time()  # Update GPS timestamp even without speed
                 
                 # Print GPS data every 10 valid readings for debugging
                 if valid_gps_count % 10 == 1:
                     lat, lon, speed = gps_data
                     print(f"GPS Update #{valid_gps_count}: Lat={lat:.6f}, Lon={lon:.6f}, Speed={speed:.2f} km/h")
             else:
+                # GPS data is None or invalid - reset GPS data to force accelerometer fallback
+                with data_lock:
+                    latest_gps = (latest_gps[0], latest_gps[1], None)
+                
                 # Print status every 50 failed attempts
                 if gps_read_count % 50 == 0:
                     time_since_last_fix = time.time() - last_valid_gps_time if last_valid_gps_time > 0 else 0
@@ -179,6 +201,15 @@ def gps_thread(gps_serial):
                     
         except Exception as e:
             print(f"GPS thread error: {e}")
+            consecutive_errors += 1
+            
+            # Immediately reset GPS data on any I/O error to force accelerometer fallback
+            with data_lock:
+                latest_gps = (latest_gps[0], latest_gps[1], None)
+
+            # After multiple consecutive errors, warn user
+            if consecutive_errors >= max_consecutive_errors:
+                print(f"GPS: {consecutive_errors} consecutive errors - using accelerometer speed calculation")
             
         time.sleep(0.2)
     
@@ -288,6 +319,10 @@ def main():
                 
                 # Use the final calculated speed instead of raw GPS speed
                 spd = final_speed_kmh
+                
+                # Debug: Print speed source every 10 seconds (300 samples at 30Hz)
+                if (time.time() % 10) < SAMPLE_INTERVAL:  # Print approximately every 10 seconds
+                    print(f"Speed: {spd:.2f} km/h (Source: {speed_source})")
 
                 # Poll Firebase control flags periodically
                 global last_control_poll, prev_calc_model, current_is_active, current_calc_model
