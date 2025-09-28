@@ -91,15 +91,44 @@ def mpu_thread():
 
 def gps_thread(gps_serial):
     global latest_gps
+    last_valid_gps_time = 0
+    gps_read_count = 0
+    valid_gps_count = 0
+    
+    print("GPS thread started...")
+    
     while not stop_event.is_set():
-        gps_data = gps_utils.get_gps_data(gps_serial)
-        if gps_data:
-            with data_lock:
-                if len(gps_data) == 3:
-                    latest_gps = gps_data
-                else:
-                    latest_gps = (gps_data[0], gps_data[1], None)
+        try:
+            gps_data = gps_utils.get_gps_data(gps_serial)
+            gps_read_count += 1
+            
+            if gps_data and gps_data != (None, None, None):
+                valid_gps_count += 1
+                last_valid_gps_time = time.time()
+                
+                with data_lock:
+                    if len(gps_data) == 3:
+                        latest_gps = gps_data
+                    else:
+                        latest_gps = (gps_data[0], gps_data[1], None)
+                
+                # Print GPS data every 10 valid readings for debugging
+                if valid_gps_count % 10 == 1:
+                    lat, lon, speed = gps_data
+                    print(f"GPS Update #{valid_gps_count}: Lat={lat:.6f}, Lon={lon:.6f}, Speed={speed:.2f} km/h")
+            else:
+                # Print status every 50 failed attempts
+                if gps_read_count % 50 == 0:
+                    time_since_last_fix = time.time() - last_valid_gps_time if last_valid_gps_time > 0 else 0
+                    print(f"GPS Status: {gps_read_count} attempts, {valid_gps_count} valid readings. "
+                          f"Last fix: {time_since_last_fix:.1f}s ago")
+                    
+        except Exception as e:
+            print(f"GPS thread error: {e}")
+            
         time.sleep(0.2)
+    
+    print("GPS thread stopped.")
 
 
 def get_latest_image_for_timestamp(target_timestamp_ms):
@@ -135,16 +164,33 @@ def main():
         print(f"Firebase auth init failed: {e}")
 
     # Initialize sensors
+    print("Initializing sensors...")
     mpu_utils.init_mpu()
-    gps_serial = gps_utils.init_gps()
+    print("MPU initialized successfully.")
+    
+    print("Initializing GPS...")
+    try:
+        gps_serial = gps_utils.init_gps()
+        print("GPS initialized successfully.")
+    except Exception as e:
+        print(f"GPS initialization failed: {e}")
+        print("Continuing without GPS (GPS data will be None)")
+        gps_serial = None
 
     # Start sensor threads
     threads = [
-        threading.Thread(target=mpu_thread, daemon=True),
-        threading.Thread(target=gps_thread, args=(gps_serial,), daemon=True)
+        threading.Thread(target=mpu_thread, daemon=True)
     ]
+    
+    # Only start GPS thread if GPS is available
+    if gps_serial:
+        threads.append(threading.Thread(target=gps_thread, args=(gps_serial,), daemon=True))
+    else:
+        print("Warning: GPS thread not started due to initialization failure")
+    
     for t in threads:
         t.start()
+    print(f"Started {len(threads)} sensor threads.")
 
     # Determine ride id (auto-increment) and initialize ride-scoped control
     try:
@@ -215,7 +261,12 @@ def main():
                     time.sleep(0.2)
                     continue
 
+                # Debug GPS data periodically
                 if lat is not None and lon is not None:
+                    # Print GPS status every 30 seconds
+                    if int(time.time()) % 30 == 0 and int(time.time() * 10) % 10 == 0:  # Once per 30s
+                        print(f"GPS Status: Lat={lat:.6f}, Lon={lon:.6f}, Speed={spd:.2f} km/h")
+                    
                     t_now = time.time()
                     if (latest_speed_limit is None) or (t_now - last_speed_limit_fetch >= SPEED_LIMIT_REFRESH_S):
                         latest_speed_limit = speed_limit_utils.get_speed_limit(lat, lon, OLA_MAPS_API_KEY)
