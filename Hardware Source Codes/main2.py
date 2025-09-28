@@ -7,7 +7,6 @@ import gps_utils
 import speed_limit_utils
 import firebase_uploader
 from enum import Enum
-import glob  # added for image lookup
 
 # === SYSTEM CONFIGURATION ===
 TARGET_HZ = 30
@@ -19,7 +18,6 @@ CONTROL_POLL_INTERVAL_S = 0.5
 CSV_FILENAME = "sensor_data.csv"
 OLA_MAPS_API_KEY = "50c25aHLICdWQ4JbXp2MZwgmliGxvqJ8os1MOYe3"  # restored API key constant
 GPS_TIMEOUT_SECONDS = 5.0
-IMAGE_DIR = "captured_images"  # added for image matching
 
 # === STATE MACHINE ===
 class RideState(Enum):
@@ -153,28 +151,6 @@ def gps_thread(gps_serial):
         time.sleep(0.2)
     print("GPS thread stopped.")
 
-# === IMAGE MATCHING (simple latest <= timestamp) ===
-def get_latest_image_for_timestamp(target_ts_ms):
-    try:
-        pattern = os.path.join(IMAGE_DIR, "frame_*.jpg")
-        candidates = glob.glob(pattern)
-        best = None
-        best_diff = 1e18
-        for path in candidates:
-            name = os.path.basename(path)
-            try:
-                ts_part = name.split('_')[1].split('.')[0]
-                ts = int(ts_part)
-            except Exception:
-                continue
-            diff = target_ts_ms - ts
-            if 0 <= diff < best_diff:
-                best_diff = diff
-                best = path
-        return best
-    except Exception:
-        return None
-
 # ================== CONTROL FLAG POLLING ==================
 
 def poll_control_flags():
@@ -292,8 +268,8 @@ def main():
         t.start()
     print(f"Threads started: {len(threads)}")
 
-    # Prepare CSV (reduced columns per new raw data spec + image_path)
-    fieldnames = ['timestamp','image_path','acc_x','acc_y','acc_z','gyro_x','gyro_y','gyro_z','latitude','longitude','speed','speed_limit']
+    # Prepare CSV (reduced columns per new raw data spec)
+    fieldnames = ['timestamp','acc_x','acc_y','acc_z','latitude','longitude','speed','speed_limit']
     file_exists = os.path.isfile(CSV_FILENAME)
     csv_file = open(CSV_FILENAME, 'a', newline='')
     writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
@@ -346,12 +322,9 @@ def main():
 
             # Build row
             ts_ms = int(time.time()*1000)
-            img_path = get_latest_image_for_timestamp(ts_ms) if ride_state == RideState.ACTIVE else None
             row = {
                 'timestamp': ts_ms,
-                'image_path': img_path or '',
                 'acc_x': mpu[0], 'acc_y': mpu[1], 'acc_z': mpu[2],
-                'gyro_x': mpu[3], 'gyro_y': mpu[4], 'gyro_z': mpu[5],
                 'latitude': lat, 'longitude': lon,
                 'speed': final_speed_kmh,
                 'speed_limit': latest_speed_limit
