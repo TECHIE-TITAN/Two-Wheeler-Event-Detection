@@ -61,17 +61,11 @@ def _current_auth_token() -> str:
 
 
 def update_rider_speed(user_id: str, speed: float, speed_limit: float, warnings: Optional[Dict[str, dict]] = None) -> bool:
-    """Update rider speed related fields using NEW schema names.
-
-    Schema change:
-      current_speed -> speed
-      active_warnings_list -> active_warnings
-    """
     url = f"{DB_URL}/users/{user_id}/rider_data.json?auth={_current_auth_token()}"
     payload = {
-        "speed": speed,
+        "current_speed": speed,
         "speed_limit": speed_limit,
-        "active_warnings": warnings or {}
+        "active_warnings_list": warnings or {}
     }
     try:
         response = requests.patch(url, json=payload, timeout=5)
@@ -187,7 +181,7 @@ def get_control_flags_for_ride(user_id: str, ride_id: Optional[str]) -> Tuple[bo
     If ride_id is None, falls back to the top-level control locations.
     """
     try:
-        if (ride_id):
+        if ride_id:
             url = f"{DB_URL}/users/{user_id}/rides/{ride_id}/rider_control/ride_status.json?auth={_current_auth_token()}"
             resp = requests.get(url, timeout=5)
             if resp.status_code == 200:
@@ -259,99 +253,3 @@ def set_control_flag(user_id: str, field: str, value: bool, ride_id: Optional[st
 def toggle_calculate_model_off(user_id: str, ride_id: Optional[str] = None) -> bool:
     """Convenience helper to set calculate_model back to False for a ride or legacy path."""
     return set_control_flag(user_id, "calculate_model", False, ride_id=ride_id)
-
-
-# --- New Ride Workflow Helpers (raw_data upload, finalize, model placeholder) ---
-
-def upload_raw_data(user_id: str, ride_id: str, rows: list) -> bool:
-    """Upload raw ride data array under rides/<ride_id>/raw_data.
-
-    For large rides this could be chunked; here we chunk in groups of 400 entries
-    to keep request size reasonable. Returns True if all chunks succeed.
-    Each row is expected to be a JSON-serializable dict.
-    """
-    if not rows:
-        return True
-    chunk_size = 400
-    all_ok = True
-    for i in range(0, len(rows), chunk_size):
-        chunk = rows[i:i+chunk_size]
-        # Use PATCH with numeric index objects to allow resumability.
-        # Build an object {index: row, ...}
-        payload = {str(i + j): chunk[j] for j in range(len(chunk))}
-        url = f"{DB_URL}/users/{user_id}/rides/{ride_id}/raw_data.json?auth={_current_auth_token()}"
-        try:
-            r = requests.patch(url, json=payload, timeout=15)
-            if r.status_code != 200:
-                print(f"Raw data chunk upload failed @ {i}: {r.status_code}")
-                all_ok = False
-        except Exception as e:
-            print(f"Raw data chunk upload exception @ {i}: {e}")
-            all_ok = False
-    return all_ok
-
-
-def write_processed_summary(user_id: str, ride_id: str, summary: Dict) -> bool:
-    url = f"{DB_URL}/users/{user_id}/rides/{ride_id}/processed_summary.json?auth={_current_auth_token()}"
-    try:
-        r = requests.put(url, json=summary, timeout=8)
-        return r.status_code == 200
-    except Exception as e:
-        print(f"Processed summary write exception: {e}")
-        return False
-
-
-def process_model_placeholder(rows: list) -> Dict:
-    """Very simple placeholder model processing creating aggregate stats."""
-    if not rows:
-        return {"sample_count": 0}
-    speeds = [r.get("speed") for r in rows if r.get("speed") is not None]
-    accel_x_vals = [r.get("acc_x") for r in rows if r.get("acc_x") is not None]
-    return {
-        "sample_count": len(rows),
-        "max_speed_kmh": max(speeds) if speeds else None,
-        "avg_speed_kmh": (sum(speeds)/len(speeds)) if speeds else None,
-        "avg_acc_x": (sum(accel_x_vals)/len(accel_x_vals)) if accel_x_vals else None,
-        "generated_at": int(time.time()*1000)
-    }
-
-
-def set_ride_end_time(user_id: str, ride_id: str, end_time_ms: int) -> bool:
-    payload = {"end_time": end_time_ms}
-    url = f"{DB_URL}/users/{user_id}/rides/{ride_id}/rider_control/ride_status.json?auth={_current_auth_token()}"
-    try:
-        r = requests.patch(url, json=payload, timeout=5)
-        return r.status_code == 200
-    except Exception as e:
-        print(f"Set ride end_time exception: {e}")
-        return False
-
-
-def finalize_ride(user_id: str, ride_id: str) -> bool:
-    """Set is_active and calculate_model to False (ride closed)."""
-    payload = {"is_active": False, "calculate_model": False}
-    url = f"{DB_URL}/users/{user_id}/rides/{ride_id}/rider_control/ride_status.json?auth={_current_auth_token()}"
-    try:
-        r = requests.patch(url, json=payload, timeout=5)
-        return r.status_code == 200
-    except Exception as e:
-        print(f"Finalize ride exception: {e}")
-        return False
-
-
-def push_realtime_batch(user_id: str, speed: float, speed_limit: float, warnings: Optional[Dict[str, dict]], mpu_tuple=None, timestamp_ms: Optional[int] = None):
-    """Convenience wrapper to push speed + warnings (+ optional latest MPU) once per batch.
-    mpu_tuple expected as (acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z) if provided.
-    """
-    if warnings is None:
-        warnings = {}
-    if timestamp_ms is None:
-        timestamp_ms = int(time.time()*1000)
-    try:
-        # Push speed + warnings
-        update_rider_speed(user_id, speed, speed_limit, warnings)
-        # Optionally push last MPU sample
-        if mpu_tuple and all(v is not None for v in mpu_tuple):
-            update_rider_mpu(user_id, *mpu_tuple, timestamp_ms)
-    except Exception as e:
-        print(f"push_realtime_batch error: {e}")

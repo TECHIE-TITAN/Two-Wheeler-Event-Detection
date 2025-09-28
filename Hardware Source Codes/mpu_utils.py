@@ -2,7 +2,7 @@ import smbus2
 import time
 import math
 
-# === MPU6500 CONFIGURATION ===
+# MPU6500 Registers
 MPU_ADDR = 0x68
 PWR_MGMT_1 = 0x6B
 ACCEL_XOUT_H = 0x3B
@@ -10,7 +10,8 @@ GYRO_XOUT_H = 0x43
 
 bus = smbus2.SMBus(1)
 
-# === CALIBRATION BIAS STORAGE ===
+# Global variables for storing zero-error bias
+# They will be populated during calibration.
 accel_bias = (0.0, 0.0, 0.0)
 gyro_bias = (0.0, 0.0, 0.0)
 
@@ -38,7 +39,10 @@ def get_mpu_data_raw():
         return None
 
 def calibrate_mpu():
-    """Calculates the zero-error bias for the MPU6500 by averaging readings over 1 second."""
+    """
+    Calculates the zero-error bias for the MPU6500 by averaging readings
+    over the first second of operation.
+    """
     global accel_bias, gyro_bias
     
     print("Calibrating MPU6500. Please keep the sensor still for 1 second...")
@@ -58,9 +62,10 @@ def calibrate_mpu():
             gyro_sum[1] += raw_data[4]
             gyro_sum[2] += raw_data[5]
             reading_count += 1
-            time.sleep(0.01)
+            time.sleep(0.01) # Small delay to avoid overwhelming the bus
 
     if reading_count > 0:
+        # Calculate the average (bias) and convert to standard units
         accel_bias = (
             (acc_sum[0] / reading_count) / 16384.0,
             (acc_sum[1] / reading_count) / 16384.0,
@@ -87,8 +92,13 @@ def init_mpu():
         print(f"Error initializing MPU6500: {e}")
 
 def get_mpu_data():
-    """Reads and returns calibrated MPU6500 accelerometer and gyroscope data in standard units (g and rad/s)."""
+    """
+    Reads and returns a 6-tuple of MPU6500 accelerometer and gyroscope data.
+    The values are converted to standard units (g and rad/s) and have the
+    zero-error bias subtracted.
+    """
     try:
+        # Read and scale the raw data
         acc_x = _read_raw_data(ACCEL_XOUT_H) / 16384.0
         acc_y = _read_raw_data(ACCEL_XOUT_H + 2) / 16384.0
         acc_z = _read_raw_data(ACCEL_XOUT_H + 4) / 16384.0
@@ -96,6 +106,7 @@ def get_mpu_data():
         gyro_y = _read_raw_data(GYRO_XOUT_H + 2) / 131.0
         gyro_z = _read_raw_data(GYRO_XOUT_H + 4) / 131.0
         
+        # Subtract the calculated bias
         accel_data_calibrated = (
             acc_x - accel_bias[0],
             acc_y - accel_bias[1],
