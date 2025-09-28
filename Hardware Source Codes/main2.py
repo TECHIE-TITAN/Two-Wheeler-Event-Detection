@@ -8,7 +8,7 @@ import gps_utils  # type: ignore
 import speed_limit_utils  # type: ignore
 import firebase_uploader  # type: ignore
 
-TARGET_HZ = 1
+TARGET_HZ = 30
 SAMPLE_INTERVAL = 1.0 / TARGET_HZ
 OLA_MAPS_API_KEY = "50c25aHLICdWQ4JbXp2MZwgmliGxvqJ8os1MOYe3"
 SPEED_LIMIT_REFRESH_S = 1.0  
@@ -35,49 +35,14 @@ def model_calculation(ride_id: str):
     """Read the entire CSV and upload as JSON to Firebase ride_data.
     After successful upload, calculate_model will be toggled false by caller.
     """
-    print("Running model_calculation(): uploading CSV to Firebase ...")
-    rows = []
-    try:
-        if not os.path.exists(CSV_FILENAME):
-            print(f"CSV file not found: {CSV_FILENAME}")
-            return
-        with open(CSV_FILENAME, "r", newline="") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                # Normalize timestamp to integer ms string
-                ts_val = row.get("timestamp")
-                try:
-                    # If timestamp was a float string, convert to ms int
-                    ts_float = float(ts_val)
-                    ts_ms = int(ts_float * 1000) if ts_float < 1e12 else int(ts_float)
-                except Exception:
-                    ts_ms = int(time.time() * 1000)
-                row["timestamp"] = str(ts_ms)
-
-                # Optionally upload associated image and replace with a DB reference
-                img_path = row.get("image_path")
-                if img_path:
-                    # Use normalized timestamp as key for the image under the ride
-                    ts_key = row.get("timestamp") or str(int(time.time() * 1000))
-                    ref = firebase_uploader.upload_ride_image_base64_for_ride(USER_ID, ride_id, ts_key, img_path)
-                    if ref:
-                        # include DB ref and also embed a small pointer under the row
-                        row["image_db_ref"] = ref
-                        # also store the base64 under ride_data keyed by timestamp
-                        row["base64"] = "(stored under ride_images_base64)"
-                rows.append(row)
-    except Exception as e:
-        print(f"Error reading CSV for model_calculation: {e}")
-        return
-
-    try:
-        ok = firebase_uploader.upload_ride_data_for_ride(USER_ID, ride_id, rows)
-        if ok:
-            print(f"Uploaded {len(rows)} rows to Firebase ride_data.")
-        else:
-            print("Failed to upload ride_data to Firebase.")
-    except Exception as e:
-        print(f"Firebase upload during model_calculation failed: {e}")
+    # CSV/image uploads have been disabled by configuration.
+    # The original behavior read the CSV, uploaded images as base64 and
+    # PUT the entire ride_data array to Firebase. To keep only live
+    # sensor telemetry (MPU/GPS/speed/speed_limit) being pushed, we
+    # intentionally skip reading or uploading the CSV and images here.
+    print("model_calculation() called, but CSV and image uploads are disabled in this build.")
+    # Caller will toggle calculate_model off and may pause collection as before.
+    return
 
 
 def mpu_thread():
