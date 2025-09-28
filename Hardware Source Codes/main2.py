@@ -32,10 +32,13 @@ _est_speed_lock = threading.Lock()  # protect estimated speed shared state
 
 # Running bias estimate to remove accel DC bias (in m/s^2)
 _accel_bias_m_s2 = 0.0
+_accel_filtered = 0.0  # low-pass filtered acceleration
 # Parameters for bias estimator and deadband
-_BIAS_ALPHA = 0.0005      # very slow low-pass to capture DC bias
-_DEADBAND_ACCEL = 0.02    # m/s^2 threshold to treat tiny accel as zero
+_BIAS_ALPHA = 0.01        # faster bias adaptation (was 0.0005)
+_DEADBAND_ACCEL = 0.1     # larger deadband to ignore more noise (was 0.02)
 _MIN_SPEED_FOR_SYNC = 0.1  # m/s: only sync estimator to GPS if speed reasonably > this
+_MAX_REASONABLE_ACCEL = 5.0  # m/s^2: clamp unrealistic acceleration values
+_SPEED_DECAY_FACTOR = 0.98   # slight decay when no significant acceleration
 
 
 def sensor_thread(func, key, *args):
@@ -112,7 +115,7 @@ def _update_estimated_speed_from_accel(accel_tuple, timestamp_ms):
     - accelerations are assumed to be in 'g' per your repo: convert to m/s^2 by *9.81.
     - Uses a slow running bias estimator to remove DC bias and a deadband to reduce drift.
     """
-    global _est_speed_m_s, _last_mpu_timestamp_ms, _accel_bias_m_s2
+    global _est_speed_m_s, _last_mpu_timestamp_ms, _accel_bias_m_s2, _accel_filtered
 
     if accel_tuple is None:
         return
@@ -150,20 +153,31 @@ def _update_estimated_speed_from_accel(accel_tuple, timestamp_ms):
 
     # Remove bias
     acc_x_m_s2 = acc_x_m_s2_raw - _accel_bias_m_s2
+    
+    # Apply low-pass filter to smooth acceleration (helps reduce vibration noise)
+    _accel_filtered = 0.7 * _accel_filtered + 0.3 * acc_x_m_s2
+    
+    # Clamp unrealistic acceleration values
+    acc_x_m_s2_final = max(-_MAX_REASONABLE_ACCEL, min(_MAX_REASONABLE_ACCEL, _accel_filtered))
 
     # Deadband to avoid tiny noisy values accumulating
-    if abs(acc_x_m_s2) < _DEADBAND_ACCEL:
-        acc_x_m_s2 = 0.0
+    if abs(acc_x_m_s2_final) < _DEADBAND_ACCEL:
+        acc_x_m_s2_final = 0.0
 
     # Integrate to update velocity (m/s)
-    delta_v = acc_x_m_s2 * dt_s
+    delta_v = acc_x_m_s2_final * dt_s
     with _est_speed_lock:
         new_speed = _est_speed_m_s + delta_v
+        
+        # Apply slight decay if no significant acceleration (helps with drift)
+        if abs(acc_x_m_s2_final) < _DEADBAND_ACCEL:
+            new_speed *= _SPEED_DECAY_FACTOR
+            
         # Small deadband on velocity too
         if abs(new_speed) < 0.02:
             new_speed = 0.0
-        # clamp to non-negative (we assume forward axis only)
-        _est_speed_m_s = max(0.0, new_speed)
+        # clamp to reasonable speed range (max ~200 km/h = ~55 m/s)
+        _est_speed_m_s = max(0.0, min(55.0, new_speed))
 
 
 def get_current_estimated_speed_m_s():
@@ -185,6 +199,21 @@ def haversine_m(lat1, lon1, lat2, lon2):
 def main():
     global latest_speed_limit, last_speed_limit_fetch, _est_speed_m_s
 
+    # Initialize MPU sensor
+    try:
+        mpu_utils.init_mpu()
+        print("MPU6500 initialized successfully")
+    except Exception as e:
+        print(f"MPU6500 initialization failed: {e}")
+
+    # Initialize GPS serial connection
+    try:
+        gps_serial = gps_utils.init_gps()
+        print("GPS initialized successfully")
+    except Exception as e:
+        print(f"GPS initialization failed: {e}")
+        gps_serial = None
+
     # For position-based fallback (in case GPS speed field missing)
     last_gps_fix = (None, None)
     last_gps_fix_time = None
@@ -192,8 +221,13 @@ def main():
     # Start sensor threads
     threads = [
         threading.Thread(target=sensor_thread, args=(mpu_utils.get_mpu_data, "mpu_data")),
-        threading.Thread(target=sensor_thread, args=(gps_utils.get_gps_data, "gps_data")),
     ]
+    
+    # Only start GPS thread if GPS was initialized successfully
+    if gps_serial is not None:
+        threads.append(threading.Thread(target=sensor_thread, args=(gps_utils.get_gps_data, "gps_data", gps_serial)))
+    else:
+        print("GPS not available - running without GPS data")
     for t in threads:
         t.daemon = True
         t.start()
