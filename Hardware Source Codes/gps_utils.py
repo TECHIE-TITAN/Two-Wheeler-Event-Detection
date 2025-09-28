@@ -120,13 +120,21 @@ def get_gps_data(gps_serial):
                     
                     if DEBUG_GPS:
                         print(f"GPS Data - Status: {status}, Lat: {lat_raw}{lat_dir}, Lon: {lon_raw}{lon_dir}, Speed: {speed_knots}kn")
+                        print(f"Raw speed field: '{speed_knots}' (type: {type(speed_knots)})")
                     
                     # Check if GPS has a valid fix
                     if status == 'A' and lat_raw and lon_raw and lat_dir and lon_dir:
                         # Parse coordinates and speed
                         latitude = _parse_lat_lon(lat_raw, lat_dir)
                         longitude = _parse_lat_lon(lon_raw, lon_dir)
-                        speed_kmh = float(speed_knots) * KNOTS_TO_KMH if speed_knots else 0.0
+                        
+                        # Parse speed with better error handling
+                        try:
+                            speed_kmh = float(speed_knots) * KNOTS_TO_KMH if speed_knots and speed_knots.strip() else 0.0
+                        except (ValueError, TypeError):
+                            if DEBUG_GPS:
+                                print(f"Warning: Invalid speed value '{speed_knots}', using 0.0")
+                            speed_kmh = 0.0
 
                         if latitude is not None and longitude is not None:
                             if DEBUG_GPS:
@@ -147,6 +155,66 @@ def get_gps_data(gps_serial):
     except (serial.SerialException, ValueError, IndexError) as e:
         print(f"Error reading or parsing GPS data: {e}")
         return (None, None, None)
+
+
+def debug_speed_issue(gps_serial, readings=10):
+    """
+    Debug function to analyze speed readings from GPS.
+    Call this to see what speed values are actually coming from the GPS.
+    """
+    print(f"Debugging GPS speed issue - collecting {readings} GPRMC readings...")
+    print("Looking for patterns in speed field...")
+    print("-" * 80)
+    
+    speed_values = []
+    reading_count = 0
+    
+    while reading_count < readings:
+        try:
+            line = gps_serial.readline().decode("ascii", errors="ignore").strip()
+            
+            if line.startswith("$GPRMC"):
+                parts = line.split(",")
+                if len(parts) >= 8:
+                    status = parts[2]
+                    speed_knots = parts[7]
+                    
+                    print(f"Reading #{reading_count + 1}: Status={status}, Speed_knots='{speed_knots}'")
+                    
+                    if status == 'A' and speed_knots:
+                        try:
+                            speed_val = float(speed_knots)
+                            speed_kmh = speed_val * KNOTS_TO_KMH
+                            speed_values.append(speed_val)
+                            print(f"  -> Converted: {speed_val:.3f} knots = {speed_kmh:.3f} km/h")
+                        except ValueError:
+                            print(f"  -> ERROR: Cannot convert '{speed_knots}' to float")
+                    else:
+                        print(f"  -> Skipping: Status={status}, Speed='{speed_knots}'")
+                    
+                    reading_count += 1
+                    print()
+        except Exception as e:
+            print(f"Error reading GPS: {e}")
+            break
+    
+    print("-" * 80)
+    if speed_values:
+        print(f"Speed analysis from {len(speed_values)} valid readings:")
+        print(f"  Min speed: {min(speed_values):.3f} knots ({min(speed_values) * KNOTS_TO_KMH:.3f} km/h)")
+        print(f"  Max speed: {max(speed_values):.3f} knots ({max(speed_values) * KNOTS_TO_KMH:.3f} km/h)")
+        print(f"  Avg speed: {sum(speed_values)/len(speed_values):.3f} knots ({sum(speed_values)/len(speed_values) * KNOTS_TO_KMH:.3f} km/h)")
+        
+        # Check if all values are the same (constant speed issue)
+        if len(set(speed_values)) == 1:
+            print(f"  *** PROBLEM: All speed readings are identical: {speed_values[0]:.3f} knots ***")
+            print("  This suggests GPS module is providing constant/cached speed data")
+        elif len(set(speed_values)) <= 2:
+            print(f"  *** WARNING: Only {len(set(speed_values))} unique speed values detected ***")
+        else:
+            print(f"  Speed values appear to be varying ({len(set(speed_values))} unique values)")
+    else:
+        print("No valid speed readings collected!")
 
 
 def test_gps_connection(port=GPS_PORT, baud=GPS_BAUD, duration=30):
