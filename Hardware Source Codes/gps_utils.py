@@ -7,7 +7,6 @@ parsing the $GPRMC NMEA sentence to extract latitude, longitude, and speed.
 import serial
 import glob
 import os
-import time
 
 # Configuration
 GPS_PORT = "/dev/serial0"
@@ -118,14 +117,10 @@ def _parse_lat_lon(coord_str, direction):
         return None
 
 
-def get_gps_data(gps_serial, timeout=2.0):
+def get_gps_data(gps_serial):
     """
     Reads the GPS serial port, finds a valid $GPRMC sentence, and returns
     parsed data.
-
-    Args:
-        gps_serial: The serial connection to the GPS
-        timeout: Maximum time to wait for GPS data (seconds)
 
     Returns:
         A tuple (latitude, longitude, speed_kmh) or (None, None, None) if
@@ -135,39 +130,27 @@ def get_gps_data(gps_serial, timeout=2.0):
         if not gps_serial.is_open:
             print("GPS serial port is closed")
             return (None, None, None)
+            
+        # Check if data is available
+        if gps_serial.in_waiting == 0:
+            # No data waiting, return None instead of blocking
+            return (None, None, None)
         
-        # Clear any old data in buffer first
-        gps_serial.reset_input_buffer()
-        
-        # Set a reasonable timeout for reading
-        start_time = time.time()
-        
-        # Try reading lines until we find valid data or timeout
+        # Try reading a few lines to find a valid one
         lines_read = 0
-        max_lines = 50  # Increased limit for better reliability
+        max_lines = 10  # Limit to prevent infinite loops
         
-        while lines_read < max_lines and (time.time() - start_time) < timeout:
+        while lines_read < max_lines and gps_serial.in_waiting > 0:
             try:
-                # Wait for data with a small timeout
-                if gps_serial.in_waiting == 0:
-                    time.sleep(0.05)  # Reduced sleep time
-                    continue
-                    
                 line = gps_serial.readline().decode("ascii", errors="ignore").strip()
                 lines_read += 1
                 
                 if not line:  # Empty line
                     continue
-                
-                # Enable debug output for troubleshooting
-                if line.startswith("$GP") or line.startswith("$GN"):
-                    print(f"GPS debug: {line[:80]}...")
                     
                 # Look for GPRMC or GNRMC sentences (more common in modern GPS modules)
                 if line.startswith("$GPRMC") or line.startswith("$GNRMC"):
                     parts = line.split(",")
-                    print(f"GPRMC parts: {len(parts)}, Status: {parts[2] if len(parts) > 2 else 'N/A'}")
-                    
                     # Check for basic validity: enough parts and 'A' status (active)
                     if len(parts) > 9 and parts[2] == 'A':
                         lat_raw = parts[3]
@@ -183,15 +166,18 @@ def get_gps_data(gps_serial, timeout=2.0):
 
                         if latitude is not None and longitude is not None:
                             # Return the first valid data found
-                            print(f"Valid GPS data found: lat={latitude}, lon={longitude}, speed={speed_kmh}")
                             return (latitude, longitude, speed_kmh)
                     elif len(parts) > 2 and parts[2] == 'V':
                         # GPS fix not available (V = void, A = active)
-                        print("GPS searching for satellites (no fix yet)...")
+                        # This is normal when GPS doesn't have satellite lock
                         pass
-                    elif len(parts) > 2:
-                        print(f"GPS status unknown: {parts[2]}")
                         
+                # Debug: print other GPS sentences occasionally
+                elif line.startswith("$GP") or line.startswith("$GN"):
+                    # Uncomment next line for debugging GPS sentences
+                    # print(f"GPS debug: {line[:60]}...")
+                    pass
+                    
             except UnicodeDecodeError:
                 # Skip lines that can't be decoded
                 continue
@@ -200,7 +186,6 @@ def get_gps_data(gps_serial, timeout=2.0):
                 continue
 
         # If no valid $GPRMC/$GNRMC sentence was found
-        print(f"No valid GPS data found after reading {lines_read} lines in {time.time() - start_time:.2f}s")
         return (None, None, None)
 
     except serial.SerialException as e:
