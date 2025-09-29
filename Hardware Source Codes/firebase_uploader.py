@@ -240,27 +240,21 @@ def set_control_flag(user_id: str, field: str, value: bool, ride_id: Optional[st
 def get_current_ride_id(user_id: str) -> Optional[str]:
     """Reads users/{uid}/next_ride_id and returns it as a string if present.
 
-    Falls back to the latest existing ride id (max numeric key) under users/{uid}/rides
-    when next_ride_id is missing or invalid.
+    The schema provided indicates `next_ride_id` is the latest/current ride id.
     """
     try:
         url = f"{DB_URL}/users/{user_id}/next_ride_id.json?auth={_current_auth_token()}"
         resp = requests.get(url, timeout=5)
-        if resp.status_code == 200:
-            val = resp.json()
-            if val is not None:
-                if isinstance(val, (int, float)):
-                    return str(int(val))
-                if isinstance(val, str) and val.strip() != "":
-                    return val
-        # Fallback: read rides keys and pick the max numeric key
-        rides_url = f"{DB_URL}/users/{user_id}/rides.json?auth={_current_auth_token()}"
-        r2 = requests.get(rides_url, timeout=6)
-        if r2.status_code == 200:
-            js = r2.json() or {}
-            numeric_ids = [int(k) for k in js.keys() if isinstance(k, str) and k.isdigit()]
-            if numeric_ids:
-                return str(max(numeric_ids))
+        if resp.status_code != 200:
+            return None
+        val = resp.json()
+        if val is None:
+            return None
+        # Coerce to string index
+        if isinstance(val, (int, float)):
+            return str(int(val))
+        if isinstance(val, str):
+            return val
         return None
     except Exception as e:
         print(f"Firebase get_current_ride_id exception: {e}")
