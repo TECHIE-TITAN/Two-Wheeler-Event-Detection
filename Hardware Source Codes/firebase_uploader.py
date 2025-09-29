@@ -1,7 +1,7 @@
 import time
 import os
 import requests
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 DB_URL = "https://wheeler-event-detection-default-rtdb.asia-southeast1.firebasedatabase.app"
 _API_KEY = "AIzaSyA__tMBGiQ-PVqyvv9kvNHaSUJk2QPXU-c"
@@ -128,7 +128,8 @@ def init_ride(user_id: str, start_timestamp_ms: int) -> bool:
     url = f"{DB_URL}/users/{user_id}/rider_control.json?auth={_current_auth_token()}"
     payload = {
         "is_active": True,
-        "start_time": start_timestamp_ms
+        "start_time": start_timestamp_ms,
+        "calculate_model": False
     }
     try:
         response = requests.patch(url, json=payload, timeout=5)
@@ -144,6 +145,7 @@ def init_ride_for_ride(user_id: str, ride_id: str, start_timestamp_ms: int) -> b
     url = f"{DB_URL}/users/{user_id}/rides/{ride_id}/ride_control.json?auth={_current_auth_token()}"
     payload = {
         "is_active": True,
+        "calculate_model": False,
         "start_time": start_timestamp_ms
     }
     try:
@@ -191,6 +193,46 @@ def _ride_status_url(user_id: str, prefer_top_level: bool = True) -> str:
     return f"{DB_URL}/users/{user_id}/rider_control.json?auth={_current_auth_token()}"
 
 
+def get_control_flags(user_id: str) -> Tuple[bool, bool]:
+    """
+    Returns (is_active, calculate_model) from Realtime DB.
+    Tries top-level path first, then falls back to /users path.
+    """
+    # This legacy function remains but we now route through the more general
+    # ride-scoped helper below. Keep for backward compatibility.
+    return get_control_flags_for_ride(user_id, None)
+
+
+def get_control_flags_for_ride(user_id: str, ride_id: Optional[str]) -> Tuple[bool, bool]:
+    """Returns (is_active, calculate_model) for a given ride_id.
+    If ride_id is None, falls back to the top-level control locations.
+    """
+    try:
+        if ride_id:
+            url = f"{DB_URL}/users/{user_id}/rides/{ride_id}/ride_control.json?auth={_current_auth_token()}"
+            resp = requests.get(url, timeout=5)
+            if resp.status_code == 200:
+                js = resp.json() or {}
+                return bool(js.get("is_active", False)), bool(js.get("calculate_model", False))
+        # Try legacy fallback location under users/<uid>/rider_control
+        resp = requests.get(_ride_status_url(user_id, True), timeout=5)
+        if resp.status_code == 200:
+            js = resp.json() or {}
+            return bool(js.get("is_active", False)), bool(js.get("calculate_model", False))
+    except Exception as e:
+        print(f"Firebase get_control_flags_for_ride exception: {e}")
+
+    try:
+        resp = requests.get(_ride_status_url(user_id, False), timeout=5)
+        if resp.status_code == 200:
+            js = resp.json() or {}
+            return bool(js.get("is_active", False)), bool(js.get("calculate_model", False))
+    except Exception as e:
+        print(f"Firebase get_control_flags_for_ride fallback exception: {e}")
+
+    return False, False
+
+
 def get_next_ride_id(user_id: str) -> str:
     """Return the next integer ride id as a string.
 
@@ -212,7 +254,7 @@ def get_next_ride_id(user_id: str) -> str:
 
 
 def set_control_flag(user_id: str, field: str, value: bool, ride_id: Optional[str] = None) -> bool:
-    """Sets a boolean field under ride_control for a ride if ride_id provided,
+    """Sets a boolean field under ride_status for a ride if ride_id provided,
     otherwise tries the legacy top-level paths.
     """
     payload = {field: bool(value)}
@@ -236,54 +278,6 @@ def set_control_flag(user_id: str, field: str, value: bool, ride_id: Optional[st
         return False
 
 
-# ---- New helpers for latest ride id based workflow ----
-def get_current_ride_id(user_id: str) -> Optional[str]:
-    """Reads users/{uid}/next_ride_id and returns it as a string if present.
-
-    The schema provided indicates `next_ride_id` is the latest/current ride id.
-    """
-    try:
-        url = f"{DB_URL}/users/{user_id}/next_ride_id.json?auth={_current_auth_token()}"
-        resp = requests.get(url, timeout=5)
-        if resp.status_code != 200:
-            return None
-        val = resp.json()
-        if val is None:
-            return None
-        # Coerce to string index
-        if isinstance(val, (int, float)):
-            return str(int(val))
-        if isinstance(val, str):
-            return val
-        return None
-    except Exception as e:
-        print(f"Firebase get_current_ride_id exception: {e}")
-        return None
-
-
-def get_is_active_for_ride(user_id: str, ride_id: Optional[str]) -> bool:
-    """Read only `is_active` for a ride. If ride_id is None, check legacy top-level control."""
-    try:
-        if ride_id:
-            url = f"{DB_URL}/users/{user_id}/rides/{ride_id}/ride_control.json?auth={_current_auth_token()}"
-            resp = requests.get(url, timeout=5)
-            if resp.status_code == 200:
-                js = resp.json() or {}
-                return bool(js.get("is_active", False))
-        # Fallback legacy location
-        resp = requests.get(_ride_status_url(user_id, True), timeout=5)
-        if resp.status_code == 200:
-            js = resp.json() or {}
-            return bool(js.get("is_active", False))
-    except Exception as e:
-        print(f"Firebase get_is_active_for_ride exception: {e}")
-
-    try:
-        resp = requests.get(_ride_status_url(user_id, False), timeout=5)
-        if resp.status_code == 200:
-            js = resp.json() or {}
-            return bool(js.get("is_active", False))
-    except Exception as e:
-        print(f"Firebase get_is_active_for_ride fallback exception: {e}")
-
-    return False
+def toggle_calculate_model_off(user_id: str, ride_id: Optional[str] = None) -> bool:
+    """Convenience helper to set calculate_model back to False for a ride or legacy path."""
+    return set_control_flag(user_id, "calculate_model", False, ride_id=ride_id)
