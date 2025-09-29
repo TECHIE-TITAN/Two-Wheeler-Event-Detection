@@ -61,12 +61,11 @@ def _current_auth_token() -> str:
 
 
 def update_rider_speed(user_id: str, speed: float, speed_limit: float, warnings: Optional[Dict[str, dict]] = None) -> bool:
-    # Write to new schema: users/{uid}/rider_data with keys: speed, speed_limit, active_warnings
     url = f"{DB_URL}/users/{user_id}/rider_data.json?auth={_current_auth_token()}"
     payload = {
-        "speed": speed,
+        "current_speed": speed,
         "speed_limit": speed_limit,
-        "active_warnings": warnings or {}
+        "active_warnings_list": warnings or {}
     }
     try:
         response = requests.patch(url, json=payload, timeout=5)
@@ -101,7 +100,6 @@ def update_rider_mpu(
 ) -> bool:
     if timestamp_ms is None:
         timestamp_ms = int(time.time() * 1000)
-    # Keep MPU nested under rider_data for telemetry convenience
     url = f"{DB_URL}/users/{user_id}/rider_data.json?auth={_current_auth_token()}"
     payload = {
         "mpu": {
@@ -123,12 +121,12 @@ def update_rider_mpu(
 
 
 def init_ride(user_id: str, start_timestamp_ms: int) -> bool:
-    # Legacy init_ride writes to a non-ride-scoped location. Keep for
-    # backward compatibility but prefer ride-scoped control paths.
-    url = f"{DB_URL}/users/{user_id}/rider_control.json?auth={_current_auth_token()}"
+    # Legacy init_ride writes to the non-ride-scoped location. Keep for
+    # backward compatibility; prefer using init_ride_for_ride with ride_id.
+    url = f"{DB_URL}/users/{user_id}/rider_control/ride_status.json?auth={_current_auth_token()}"
     payload = {
         "is_active": True,
-        "start_time": start_timestamp_ms,
+        "start_timestamp": start_timestamp_ms,
         "calculate_model": False
     }
     try:
@@ -141,12 +139,11 @@ def init_ride(user_id: str, start_timestamp_ms: int) -> bool:
 
 def init_ride_for_ride(user_id: str, ride_id: str, start_timestamp_ms: int) -> bool:
     """Initialize ride control status under a rides/{ride_id} path."""
-    # New schema: rides/{ride_id}/ride_control contains control keys
-    url = f"{DB_URL}/users/{user_id}/rides/{ride_id}/ride_control.json?auth={_current_auth_token()}"
+    url = f"{DB_URL}/users/{user_id}/rides/{ride_id}/rider_control/ride_status.json?auth={_current_auth_token()}"
     payload = {
         "is_active": True,
-        "calculate_model": False,
-        "start_time": start_timestamp_ms
+        "start_timestamp": start_timestamp_ms,
+        "calculate_model": False
     }
     try:
         response = requests.patch(url, json=payload, timeout=5)
@@ -160,37 +157,13 @@ def init_auth():
     _sign_in_email_password()
 
 
-# ---- Ride data uploads for new schema ----
-def upload_ride_raw_data_for_ride(user_id: str, ride_id: str, rows: list) -> bool:
-    """PUT the full array of CSV row dicts to users/{uid}/rides/{ride_id}/raw_data"""
-    try:
-        url = f"{DB_URL}/users/{user_id}/rides/{ride_id}/raw_data.json?auth={_current_auth_token()}"
-        resp = requests.put(url, json=rows, timeout=20)
-        return resp.status_code == 200
-    except Exception as e:
-        print(f"Firebase upload_ride_raw_data_for_ride exception: {e}")
-        return False
-
-
-def upload_ride_processed_for_ride(user_id: str, ride_id: str, processed_obj: dict) -> bool:
-    """Write processed/model outputs under users/{uid}/rides/{ride_id}/processed"""
-    try:
-        url = f"{DB_URL}/users/{user_id}/rides/{ride_id}/processed.json?auth={_current_auth_token()}"
-        resp = requests.patch(url, json=processed_obj, timeout=10)
-        return resp.status_code == 200
-    except Exception as e:
-        print(f"Firebase upload_ride_processed_for_ride exception: {e}")
-        return False
-
-
 # ---- Control flags (Realtime Database) ----
 def _ride_status_url(user_id: str, prefer_top_level: bool = True) -> str:
-    # Return the URL to the ride control node used by legacy helpers.
-    # New preferred location for ride control is users/{uid}/rides/<ride_id>/ride_control
-    # When ride_id is not known, keep a simple users/{uid}/rider_control fallback.
+    # Prefer top-level path: /{user_id}/ride_control/ride_status
+    # Fallback used by existing writers is /users/{user_id}/...
     if prefer_top_level:
-        return f"{DB_URL}/users/{user_id}/rider_control.json?auth={_current_auth_token()}"
-    return f"{DB_URL}/users/{user_id}/rider_control.json?auth={_current_auth_token()}"
+        return f"{DB_URL}/{user_id}/ride_control/ride_status.json?auth={_current_auth_token()}"
+    return f"{DB_URL}/users/{user_id}/rider_control/ride_status.json?auth={_current_auth_token()}"
 
 
 def get_control_flags(user_id: str) -> Tuple[bool, bool]:
@@ -209,12 +182,12 @@ def get_control_flags_for_ride(user_id: str, ride_id: Optional[str]) -> Tuple[bo
     """
     try:
         if ride_id:
-            url = f"{DB_URL}/users/{user_id}/rides/{ride_id}/ride_control.json?auth={_current_auth_token()}"
+            url = f"{DB_URL}/users/{user_id}/rides/{ride_id}/rider_control/ride_status.json?auth={_current_auth_token()}"
             resp = requests.get(url, timeout=5)
             if resp.status_code == 200:
                 js = resp.json() or {}
                 return bool(js.get("is_active", False)), bool(js.get("calculate_model", False))
-        # Try legacy fallback location under users/<uid>/rider_control
+        # Try top-level locations (preferred path and fallback)
         resp = requests.get(_ride_status_url(user_id, True), timeout=5)
         if resp.status_code == 200:
             js = resp.json() or {}
@@ -260,10 +233,9 @@ def set_control_flag(user_id: str, field: str, value: bool, ride_id: Optional[st
     payload = {field: bool(value)}
     try:
         if ride_id:
-            url = f"{DB_URL}/users/{user_id}/rides/{ride_id}/ride_control.json?auth={_current_auth_token()}"
+            url = f"{DB_URL}/users/{user_id}/rides/{ride_id}/rider_control/ride_status.json?auth={_current_auth_token()}"
             r = requests.patch(url, json=payload, timeout=5)
             return r.status_code == 200
-        # Try legacy fallback location
         r = requests.patch(_ride_status_url(user_id, True), json=payload, timeout=5)
         if r.status_code == 200:
             return True
