@@ -33,9 +33,8 @@ latest_image_path = None
 latest_image_ts = None
 camera_manager = None
 
-# Track last seen control state for logging
-last_seen_ride_id = None
-last_seen_is_active = None
+last_control_poll = 0.0
+current_is_active = False
 
 # Speed calculation buffers and state
 accel_buffer = []  # Buffer to store 1 second of acceleration data (30 samples)
@@ -303,7 +302,7 @@ def camera_thread():
 
 
 def main():
-    global latest_speed_limit, last_speed_limit_fetch, last_seen_is_active, last_seen_ride_id
+    global latest_speed_limit, last_speed_limit_fetch
     try:
         firebase_uploader.init_auth()
     except Exception as e:
@@ -350,20 +349,10 @@ def main():
     next_sample_time = time.perf_counter()
 
     while not stop_event.is_set():
-        try:
-            latest_ride_id = firebase_uploader.get_current_ride_id(USER_ID)
-        except Exception as e:
-            print(f"Error reading next_ride_id: {e}")
-            latest_ride_id = None
-
+        latest_ride_id = firebase_uploader.get_current_ride_id(USER_ID)
         if latest_ride_id is None:
             time.sleep(0.5)
             continue
-
-        # Log ride id change
-        if last_seen_ride_id != latest_ride_id:
-            print(f"Control: latest_ride_id -> {latest_ride_id}")
-            last_seen_ride_id = latest_ride_id
 
         # If ride changed during active session: finalize previous ride
         if active_logging and ride_id is not None and latest_ride_id != ride_id:
@@ -387,30 +376,18 @@ def main():
                 pass
 
         ride_id = latest_ride_id
-        try:
-            is_active = firebase_uploader.get_is_active_for_ride(USER_ID, ride_id)
-        except Exception as e:
-            print(f"Error reading is_active for ride {ride_id}: {e}")
-            is_active = False
-
-        if last_seen_is_active is None or last_seen_is_active != is_active:
-            print(f"Control: ride {ride_id} is_active={is_active}")
-            last_seen_is_active = is_active
+        is_active = firebase_uploader.get_is_active_for_ride(USER_ID, ride_id)
 
         if not active_logging and is_active:
             print(f"Supervisor: ride {ride_id} is now active. Starting data collection...")
             try:
-                # Optional: ensure ride node exists; if already exists this is a no-op
                 firebase_uploader.init_ride_for_ride(USER_ID, ride_id, int(time.time() * 1000))
             except Exception as e:
                 print(f"init_ride_for_ride failed: {e}")
             # Fresh CSV
-            try:
-                with open(CSV_FILENAME, 'w', newline='') as f:
-                    writer = csv.DictWriter(f, fieldnames=fieldnames)
-                    writer.writeheader()
-            except Exception as e:
-                print(f"Error creating CSV file: {e}")
+            with open(CSV_FILENAME, 'w', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
             active_logging = True
             collecting_enabled.set()  # enable sensor & camera reads
             last_fb_push = 0.0
@@ -451,7 +428,7 @@ def main():
         spd = final_speed_kmh
 
         if (time.time() % 10) < SAMPLE_INTERVAL:
-            print(f"Speed: {spd:.2f} km/h (Source: {speed_source})  collecting={collecting_enabled.is_set()}")
+            print(f"Speed: {spd:.2f} km/h (Source: {speed_source})")
 
         if lat is not None and lon is not None:
             t_now = time.time()
@@ -474,14 +451,11 @@ def main():
         }
 
         file_exists = os.path.isfile(CSV_FILENAME)
-        try:
-            with open(CSV_FILENAME, 'a', newline='') as f:
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
-                if not file_exists:
-                    writer.writeheader()
-                writer.writerow(row)
-        except Exception as e:
-            print(f"CSV write error: {e}")
+        with open(CSV_FILENAME, 'a', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow(row)
 
         if (time.time() - last_fb_push) >= FIREBASE_PUSH_INTERVAL_S:
             try:
