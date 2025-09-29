@@ -206,3 +206,25 @@ def upload_ride_processed_for_ride(user_id: str, ride_id: str, processed_obj: di
     except Exception as e:
         print(f"Firebase upload_ride_processed_for_ride exception: {e}")
         return False
+
+
+# ---- New helper: latest existing ride id in /rides ----
+def get_latest_existing_ride_id(user_id: str) -> Optional[str]:
+    """Return the numerically largest ride id present under users/{uid}/rides.
+
+    This prefers actual existing rides over next_ride_id, useful when next_ride_id
+    has been advanced but the new ride node isn't created yet.
+    """
+    try:
+        url = f"{DB_URL}/users/{user_id}/rides.json?auth={_current_auth_token()}"
+        resp = requests.get(url, timeout=8)
+        if resp.status_code != 200:
+            return None
+        js = resp.json() or {}
+        numeric_ids = [int(k) for k in js.keys() if isinstance(k, str) and k.isdigit()]
+        if not numeric_ids:
+            return None
+        return str(max(numeric_ids))
+    except Exception as e:
+        print(f"Firebase get_latest_existing_ride_id exception: {e}")
+        return None

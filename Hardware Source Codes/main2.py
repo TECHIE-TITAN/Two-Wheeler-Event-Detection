@@ -312,11 +312,13 @@ def main():
 
     while not stop_event.is_set():
         # Poll latest ride id
-        latest_ride_id = firebase_uploader.get_current_ride_id(USER_ID)
+        latest_existing = firebase_uploader.get_latest_existing_ride_id(USER_ID)
+        latest_next = firebase_uploader.get_current_ride_id(USER_ID)
+        latest_ride_id = latest_existing or latest_next
         if latest_ride_id is None:
             # Log every ~5s while waiting for ride id to be set
             if time.time() - last_wait_log > 5:
-                print("Waiting: users/<uid>/next_ride_id not set yet...")
+                print("Waiting: no rides under users/<uid>/rides and next_ride_id not set yet...")
                 last_wait_log = time.time()
             time.sleep(0.2)
             continue
