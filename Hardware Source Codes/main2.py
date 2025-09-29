@@ -308,12 +308,17 @@ def main():
     next_sample_time = time.perf_counter()
 
     print("Supervisor: waiting for latest ride is_active to become True...")
+    last_wait_log = 0.0
 
     while not stop_event.is_set():
-        # Resolve latest ride id from next_ride_id
+        # Poll latest ride id
         latest_ride_id = firebase_uploader.get_current_ride_id(USER_ID)
         if latest_ride_id is None:
-            time.sleep(0.5)
+            # Log every ~5s while waiting for ride id to be set
+            if time.time() - last_wait_log > 5:
+                print("Waiting: users/<uid>/next_ride_id not set yet...")
+                last_wait_log = time.time()
+            time.sleep(0.2)
             continue
 
         # If ride switched while active, finalize previous
@@ -339,6 +344,14 @@ def main():
 
         ride_id = latest_ride_id
         is_active = firebase_uploader.get_is_active_for_ride(USER_ID, ride_id)
+
+        if not active_logging and not is_active:
+            # Log every ~5s while waiting for activation of the latest ride
+            if time.time() - last_wait_log > 5:
+                print(f"Waiting: ride {ride_id} is not active yet. Toggle users/<uid>/rides/{ride_id}/ride_control/is_active -> true")
+                last_wait_log = time.time()
+            time.sleep(0.1)
+            continue
 
         if not active_logging and is_active:
             print(f"Ride {ride_id} active. Starting collection...")
@@ -370,7 +383,8 @@ def main():
             continue
 
         if not active_logging:
-            time.sleep(0.2)
+            # Should not reach here, but keep idle wait small
+            time.sleep(0.1)
             continue
 
         # Active sampling
