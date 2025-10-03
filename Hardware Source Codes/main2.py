@@ -3,6 +3,7 @@ import csv
 import os
 import threading
 import glob
+from collections import deque  # Added for fixed-size acceleration buffer
 import mpu_utils  # type: ignore
 import gps_utils  # type: ignore
 import speed_limit_utils  # type: ignore
@@ -28,56 +29,47 @@ stop_event = threading.Event()
 last_control_poll = 0.0
 current_is_active = False  # Only remaining control flag
 latest_speed_source = "UNKNOWN"  # Track whether speed from GPS or ACCEL fallback
+last_accel_decimals = 3  # Track decimal precision of last acceleration reading
 
 # Speed calculation buffers and state
-accel_buffer = []  # Buffer to store 1 second of acceleration data (30 samples)
+# accel_buffer now holds ONLY the last 10 acceleration samples (m/s^2) for moving average
+accel_buffer = deque(maxlen=10)  # type: ignore
 current_speed_ms = 0.0  # Current speed in m/s
 speed_calculation_lock = threading.Lock()
 gps_last_update_time = 0.0  # Track when GPS was last successfully updated
 GPS_TIMEOUT_SECONDS = 5.0  # Consider GPS stale after 5 seconds without update
 
 def add_accel_to_buffer(acc_x):
-    """Add acceleration data to buffer and maintain 1-second window (30 samples)"""
-    global accel_buffer
+    """Add acceleration sample (converted to m/s^2) keeping only last 10 samples.
+    Also track decimal precision of the raw acceleration input to mirror precision in speed outputs."""
+    global accel_buffer, last_accel_decimals
     with speed_calculation_lock:
-        # Convert from g to m/s² (assuming acc_x is in g units)
         accel_ms2 = acc_x * 9.81 if acc_x is not None else 0.0
-        
-        accel_buffer.append(accel_ms2)
-        
-        # Keep only last 30 samples (1 second at 30Hz)
-        if len(accel_buffer) > TARGET_HZ:
-            accel_buffer = accel_buffer[-TARGET_HZ:]
+        # Determine decimal places from raw acc_x (not scaled) if provided
+        if acc_x is not None:
+            raw_str = f"{acc_x:.10f}".rstrip('0').rstrip('.')
+            if '.' in raw_str:
+                decs = len(raw_str.split('.')[1])
+                if decs > 0:
+                    last_accel_decimals = min(decs, 10)
+        accel_buffer.append(accel_ms2)  # deque auto-discards oldest beyond maxlen
 
 def calculate_speed_from_accel():
-    """Calculate speed using average acceleration over 1 second and v = u + at"""
-    global current_speed_ms, accel_buffer
-    
+    """Update and return speed using moving average of last up to 10 accel samples.
+    Integrates only over the latest SAMPLE_INTERVAL to avoid repeated accumulation
+    over overlapping windows (which previously caused runaway increases)."""
+    global current_speed_ms, accel_buffer, last_accel_decimals
     with speed_calculation_lock:
         if len(accel_buffer) == 0:
             return current_speed_ms
-        
-        # Calculate average acceleration over the buffer period
         avg_accel_ms2 = sum(accel_buffer) / len(accel_buffer)
-        
-        # Apply deadband to filter out noise (ignore very small accelerations)
-        deadband_threshold = 0.2  # m/s² - adjust based on sensor noise
-        if abs(avg_accel_ms2) < deadband_threshold:
+        if abs(avg_accel_ms2) < 0.2:
             avg_accel_ms2 = 0.0
-        
-        # Time period: buffer size / sampling rate
-        time_period = len(accel_buffer) / TARGET_HZ  # seconds
-        
-        # Apply kinematic equation: v = u + at
-        new_speed_ms = current_speed_ms + (avg_accel_ms2 * time_period)
-        
-        # Ensure speed doesn't go negative
-        new_speed_ms = max(0.0, new_speed_ms)
-        
-        # Apply reasonable speed limits (max ~200 km/h = ~55.6 m/s)
-        # new_speed_ms = min(55.6, new_speed_ms)
-        
-        current_speed_ms = new_speed_ms
+        current_speed_ms += avg_accel_ms2 * SAMPLE_INTERVAL
+        if current_speed_ms < 0.0:
+            current_speed_ms = 0.0
+        # Round internal stored speed to same decimals as acceleration (in m/s)
+        current_speed_ms = round(current_speed_ms, last_accel_decimals)
         return current_speed_ms
 
 def get_final_speed_kmh():
@@ -137,7 +129,7 @@ def mpu_thread():
 
 def gps_thread(gps_serial):
     # Simplified: no consecutive error counting; always fallback to accel-derived speed on failure
-    global latest_gps, gps_last_update_time, latest_speed_source
+    global latest_gps, gps_last_update_time, latest_speed_source, last_accel_decimals
     last_valid_gps_time = 0
     gps_read_count = 0
     valid_gps_count = 0
@@ -154,32 +146,32 @@ def gps_thread(gps_serial):
                 last_valid_gps_time = time.time()
                 with data_lock:
                     if len(gps_data) == 3:
-                        latest_gps = gps_data  # (lat, lon, speed_kmh)
+                        # Round GPS speed to match acceleration decimals if present
+                        spd_val = gps_data[2]
+                        if spd_val is not None:
+                            spd_val = round(spd_val, last_accel_decimals)
+                        latest_gps = (gps_data[0], gps_data[1], spd_val)
                         gps_last_update_time = time.time()
                         latest_speed_source = "GPS"
                     else:
                         # Partial data (lat, lon only) -> compute fallback speed from acceleration
                         accel_speed_ms = calculate_speed_from_accel()
                         accel_speed_kmh = accel_speed_ms * 3.6
+                        accel_speed_kmh = round(accel_speed_kmh, last_accel_decimals)
                         latest_gps = (gps_data[0], gps_data[1], accel_speed_kmh)
                         gps_last_update_time = time.time()
                         latest_speed_source = "ACCEL"
-                # if valid_gps_count % 10 == 1:
-                #     lat, lon, speed = latest_gps
-                #     print(f"GPS Update #{valid_gps_count}: Lat={lat:.6f}, Lon={lon:.6f}, Speed={speed:.2f} km/h")
             else:
                 # Invalid reading: keep last lat/lon, compute speed from accelerometer
                 with data_lock:
                     prev_lat, prev_lon, _prev_speed = latest_gps
                 accel_speed_ms = calculate_speed_from_accel()
                 accel_speed_kmh = accel_speed_ms * 3.6
+                accel_speed_kmh = round(accel_speed_kmh, last_accel_decimals)
                 with data_lock:
                     latest_gps = (prev_lat, prev_lon, accel_speed_kmh)
                     gps_last_update_time = time.time()
                     latest_speed_source = "ACCEL"
-                # if gps_read_count % 50 == 0:
-                #     time_since_last_fix = time.time() - last_valid_gps_time if last_valid_gps_time > 0 else 0
-                #     print(f"GPS Status: {gps_read_count} attempts, {valid_gps_count} valid. Last fix: {time_since_last_fix:.1f}s ago (ACCEL fallback {accel_speed_kmh:.2f} km/h)")
         except Exception as e:
             # On any exception: fallback speed using accelerometer; preserve last lat/lon
             print(f"GPS thread error (fallback to accel): {e}")
@@ -187,6 +179,7 @@ def gps_thread(gps_serial):
                 prev_lat, prev_lon, _prev_speed = latest_gps
             accel_speed_ms = calculate_speed_from_accel()
             accel_speed_kmh = accel_speed_ms * 3.6
+            accel_speed_kmh = round(accel_speed_kmh, last_accel_decimals)
             with data_lock:
                 latest_gps = (prev_lat, prev_lon, accel_speed_kmh)
                 gps_last_update_time = time.time()
@@ -383,9 +376,9 @@ def main():
                 writer.writerow(row)
                 # Choose precision: more decimals for fallback ACCEL speed
                 if speed_source == "ACCEL":
-                    speed_str = f"{row['speed']:.7f}"
+                    speed_str = f"{row['speed']:.{last_accel_decimals}f}"
                 else:
-                    speed_str = f"{row['speed']:.7f}"
+                    speed_str = f"{row['speed']:.{last_accel_decimals}f}"
                 print(f"Logged: Time={row['timestamp']} Acc=({row['acc_x']},{row['acc_y']},{row['acc_z']}) Gyro=({row['gyro_x']},{row['gyro_y']},{row['gyro_z']}) "
                       f"Lat={row['latitude']} Lon={row['longitude']} Speed={speed_str} km/h "
                       f"SpeedLimit={row['speed_limit']} Src={speed_source} Image={os.path.basename(row['image_path']) if row['image_path'] else 'None'}")
