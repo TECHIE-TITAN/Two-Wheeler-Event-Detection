@@ -122,49 +122,8 @@ def update_rider_mpu(
         return False
 
 
-def init_ride_for_ride(user_id: str, ride_id: str, start_timestamp_ms: int) -> bool:
-    """Initialize ride control status under a rides/{ride_id} path."""
-    # New schema: rides/{ride_id}/ride_control contains control keys
-    url = f"{DB_URL}/users/{user_id}/rides/{ride_id}/ride_control.json?auth={_current_auth_token()}"
-    payload = {
-        "is_active": True,
-        "calculate_model": False,
-        "start_time": start_timestamp_ms
-    }
-    try:
-        response = requests.patch(url, json=payload, timeout=5)
-        return response.status_code == 200
-    except Exception as e:
-        print(f"Firebase init_ride_for_ride exception: {e}")
-        return False
-
-
 def init_auth():
     _sign_in_email_password()
-
-
-# ---- Ride data uploads for new schema ----
-def upload_ride_raw_data_for_ride(user_id: str, ride_id: str, rows: list) -> bool:
-    """PUT the full array of CSV row dicts to users/{uid}/rides[ride_id]/raw_data"""
-    try:
-        # rides is an array, so we access by index without /
-        url = f"{DB_URL}/users/{user_id}/rides/{ride_id}/raw_data.json?auth={_current_auth_token()}"
-        resp = requests.put(url, json=rows, timeout=20)
-        return resp.status_code == 200
-    except Exception as e:
-        print(f"Firebase upload_ride_raw_data_for_ride exception: {e}")
-        return False
-
-
-def upload_ride_processed_for_ride(user_id: str, ride_id: str, processed_obj: dict) -> bool:
-    """Write processed/model outputs under users/{uid}/rides/{ride_id}/processed"""
-    try:
-        url = f"{DB_URL}/users/{user_id}/rides/{ride_id}/processed.json?auth={_current_auth_token()}"
-        resp = requests.patch(url, json=processed_obj, timeout=10)
-        return resp.status_code == 200
-    except Exception as e:
-        print(f"Firebase upload_ride_processed_for_ride exception: {e}")
-        return False
 
 
 # ---- Control flags (Realtime Database) ----
@@ -225,53 +184,3 @@ def get_next_ride_id(user_id: str) -> str:
     except Exception as e:
         print(f"Firebase get_next_ride_id exception: {e}")
         return "0"
-
-
-def increment_next_ride_id(user_id: str) -> bool:
-    """Increment the next_ride_id field in Firebase after starting a new ride."""
-    try:
-        # Get current value
-        url = f"{DB_URL}/users/{user_id}/next_ride_id.json?auth={_current_auth_token()}"
-        resp = requests.get(url, timeout=8)
-        if resp.status_code != 200:
-            current_id = 0
-        else:
-            current_id = resp.json() or 0
-        
-        # Increment and set
-        new_id = int(current_id) + 1
-        resp = requests.put(url, json=new_id, timeout=5)
-        return resp.status_code == 200
-    except Exception as e:
-        print(f"Firebase increment_next_ride_id exception: {e}")
-        return False
-
-
-def set_control_flag(user_id: str, field: str, value: bool, ride_id: Optional[str] = None) -> bool:
-    """Sets a boolean field under ride_status for a ride if ride_id provided,
-    otherwise tries the legacy top-level paths.
-    """
-    payload = {field: bool(value)}
-    try:
-        if ride_id:
-            url = f"{DB_URL}/users/{user_id}/rides/{ride_id}/ride_control.json?auth={_current_auth_token()}"
-            r = requests.patch(url, json=payload, timeout=5)
-            return r.status_code == 200
-        # Try legacy fallback location
-        r = requests.patch(_ride_status_url(user_id, True), json=payload, timeout=5)
-        if r.status_code == 200:
-            return True
-    except Exception as e:
-        print(f"Firebase set_control_flag (primary) exception: {e}")
-
-    try:
-        r = requests.patch(_ride_status_url(user_id, False), json=payload, timeout=5)
-        return r.status_code == 200
-    except Exception as e:
-        print(f"Firebase set_control_flag (fallback) exception: {e}")
-        return False
-
-
-def toggle_calculate_model_off(user_id: str, ride_id: Optional[str] = None) -> bool:
-    """Convenience helper to set calculate_model back to False for a ride or legacy path."""
-    return set_control_flag(user_id, "calculate_model", False, ride_id=ride_id)
