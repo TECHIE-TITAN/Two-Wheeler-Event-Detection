@@ -244,14 +244,14 @@ def wait_until_active(ride_id: str, poll_interval: float = 0.5):
     print("Waiting for ride to be activated remotely...")
     while not stop_event.is_set() and not current_is_active:
         try:
-            is_active = firebase_uploader.get_control_flags_for_ride(USER_ID, ride_id)
+            is_active, _calc = firebase_uploader.get_control_flags_for_ride(USER_ID, ride_id)
             if is_active:
                 current_is_active = True
                 print("Ride re-activated. Resuming logging.")
                 break
         except Exception:
             pass
-        time.sleep(0.5)
+        time.sleep(poll_interval)
         last_control_poll = time.time()
 
 def main():
@@ -360,7 +360,8 @@ def main():
                 t_wall = time.time()
                 if (t_wall - last_control_poll) >= CONTROL_POLL_INTERVAL_S:
                     try:
-                        current_is_active = firebase_uploader.get_control_flags_for_ride(USER_ID, ride_id)
+                        is_active, _calc = firebase_uploader.get_control_flags_for_ride(USER_ID, ride_id)
+                        current_is_active = is_active
                     except Exception:
                         pass  # retain previous state on failure
                     last_control_poll = t_wall
