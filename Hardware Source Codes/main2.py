@@ -236,23 +236,39 @@ def get_latest_image_for_timestamp(target_timestamp_ms):
 
     return best_image
 
-def wait_until_active(ride_id: str, poll_interval: float = 0.5):
-    """Block in an inactive state until remote re-activates the ride or stop_event set.
-    Periodically polls Firebase for the is_active flag.
+def wait_until_active(ride_id: str | None = None, poll_interval: float = 0.5):
+    """Obtain (if needed) the next ride_id and block until remote activates it.
+    If ride_id is None, fetch from Firebase (get_next_ride_id) and increment for next time.
+    Returns the ride_id used. Sets global current_is_active to True once activated or until stop_event set.
     """
     global current_is_active, last_control_poll
+
+    # Acquire ride id if not supplied
+    if ride_id is None:
+        try:
+            ride_id = firebase_uploader.get_next_ride_id(USER_ID)
+            print(f"Starting ride id: {ride_id}")
+            firebase_uploader.increment_next_ride_id(USER_ID)
+        except Exception as e:
+            print(f"Firebase ride init failed: {e}")
+            ride_id = "0"
+
+    if current_is_active:
+        return ride_id
+
     print("Waiting for ride to be activated remotely...")
     while not stop_event.is_set() and not current_is_active:
         try:
             is_active, _calc = firebase_uploader.get_control_flags_for_ride(USER_ID, ride_id)
             if is_active:
                 current_is_active = True
-                print("Ride re-activated. Resuming logging.")
+                print("Ride activated. Beginning logging.")
                 break
         except Exception:
             pass
         time.sleep(poll_interval)
         last_control_poll = time.time()
+    return ride_id
 
 def main():
     global latest_speed_limit, last_speed_limit_fetch, current_is_active, last_control_poll
@@ -295,18 +311,8 @@ def main():
         t.start()
     print(f"Started {len(threads)} sensor threads.")
 
-    # Determine ride id (auto-increment) and initialize ride-scoped control
-    try:
-        ride_id = firebase_uploader.get_next_ride_id(USER_ID)
-        print(f"Starting ride id: {ride_id}")
-        # Increment next_ride_id for the next ride
-        firebase_uploader.increment_next_ride_id(USER_ID)
-    except Exception as e:
-        print(f"Firebase ride init failed: {e}")
-        ride_id = "0"
-
-    # Wait for remote to set is_active True before starting
-    wait_until_active(ride_id)
+    # Wait for remote to set is_active True before starting (also acquires ride_id)
+    ride_id = wait_until_active()
 
     # Prepare CSV
     csv_filename = CSV_FILENAME
@@ -339,10 +345,6 @@ def main():
                     speed_limit = latest_speed_limit
 
                 lat, lon, spd = gps
-                # """--------------------- Change this logic ---------------------"""
-                # # Calculate final speed using our priority system
-                # spd, speed_source = get_final_speed_kmh()
-                # """-------------------------------------------------------------"""
                 target_timestamp_ms = int(time.time() * 1000)
                 img_path = get_latest_image_for_timestamp(target_timestamp_ms)
 
@@ -369,7 +371,7 @@ def main():
                 # If not active, skip sampling/pushing but keep polling
                 if not current_is_active:
                     # Enter inactive waiting state (blocking until re-activated)
-                    wait_until_active(ride_id)
+                    ride_id = wait_until_active(ride_id)
                     # Reset timing anchor after idle to avoid large sleep adjustments
                     next_sample_time = time.perf_counter() + SAMPLE_INTERVAL
                     continue
@@ -378,10 +380,6 @@ def main():
                 print(f"Logged: Time={row['timestamp']} Acc=({row['acc_x']},{row['acc_y']},{row['acc_z']}) Gyro=({row['gyro_x']},{row['gyro_y']},{row['gyro_z']}) "
                       f"Lat={row['latitude']} Lon={row['longitude']} Speed={row['speed']:.2f} km/h "
                       f"SpeedLimit={row['speed_limit']} Image={os.path.basename(row['image_path']) if row['image_path'] else 'None'}")
-                # if int(row['timestamp']) % 5 == 0:
-                #     f.flush()
-                # if int(row['timestamp']) % 5 == 0:
-                #     f.flush()
 
                 if (time.time() - last_fb_push) >= FIREBASE_PUSH_INTERVAL_S:
                     try:
