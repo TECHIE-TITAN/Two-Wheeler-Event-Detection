@@ -184,3 +184,45 @@ def get_next_ride_id(user_id: str) -> str:
     except Exception as e:
         print(f"Firebase get_next_ride_id exception: {e}")
         return "0"
+
+
+def upload_raw_data_to_firebase(user_id: str, ride_id: str, csv_filepath: str) -> bool:
+    """Upload entire CSV file content to Firebase under rides/{ride_id}/raw_data.
+    
+    Reads the CSV file and uploads each row as a JSON object.
+    Returns True if successful, False otherwise.
+    """
+    import csv as csv_module
+    
+    if not os.path.isfile(csv_filepath):
+        print(f"CSV file not found: {csv_filepath}")
+        return False
+    
+    try:
+        print(f"Uploading raw data from {csv_filepath} to Firebase...")
+        
+        # Read CSV file
+        rows_data = []
+        with open(csv_filepath, 'r', newline='') as f:
+            reader = csv_module.DictReader(f)
+            for row in reader:
+                rows_data.append(row)
+        
+        if not rows_data:
+            print("No data to upload (CSV is empty)")
+            return False
+        
+        # Upload to Firebase
+        url = f"{DB_URL}/users/{user_id}/rides/{ride_id}/raw_data.json?auth={_current_auth_token()}"
+        response = requests.put(url, json=rows_data, timeout=30)
+        
+        if response.status_code == 200:
+            print(f"Successfully uploaded {len(rows_data)} rows to Firebase")
+            return True
+        else:
+            print(f"Failed to upload raw data. Status code: {response.status_code}")
+            return False
+            
+    except Exception as e:
+        print(f"Firebase raw data upload exception: {e}")
+        return False

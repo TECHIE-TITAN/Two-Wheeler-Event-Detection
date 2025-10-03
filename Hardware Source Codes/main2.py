@@ -308,111 +308,130 @@ def main():
         t.start()
     print(f"Started {len(threads)} sensor threads.")
 
-    # Wait for remote to set is_active True before starting (also acquires ride_id)
-    ride_id = wait_until_active()
-
-    # Prepare CSV with ride_id in filename
-    csv_filename = f"rawdata_{ride_id}.csv"
+    # Main ride loop - handles multiple rides
     fieldnames = [
         'timestamp', 'image_path', 'acc_x', 'acc_y', 'acc_z', 'gyro_x', 'gyro_y', 'gyro_z',
         'latitude', 'longitude', 'speed', 'speed_limit'
     ]
-    file_exists = os.path.isfile(csv_filename)
-    with open(csv_filename, 'a', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        if not file_exists:
-            writer.writeheader()
+    
+    while not stop_event.is_set():
+        # Wait for remote to set is_active True before starting (also acquires ride_id)
+        ride_id = wait_until_active()
 
-        print(f"Logging at {TARGET_HZ} Hz to {csv_filename}. Press Ctrl+C to stop.")
-        next_sample_time = time.perf_counter()
-        last_fb_push = 0.0
+        # Prepare CSV with ride_id in filename
+        csv_filename = f"rawdata_{ride_id}.csv"
+        file_exists = os.path.isfile(csv_filename)
+        
+        with open(csv_filename, 'a', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            if not file_exists:
+                writer.writeheader()
 
-        try:
-            while not stop_event.is_set():                
-                now = time.perf_counter()
-                # To sleep through a cycle if 30 iterations finish early
-                if now < next_sample_time:
-                    time.sleep(next_sample_time - now)
-                next_sample_time += SAMPLE_INTERVAL
+            print(f"Logging at {TARGET_HZ} Hz to {csv_filename}. Press Ctrl+C to stop.")
+            next_sample_time = time.perf_counter()
+            last_fb_push = 0.0
 
-                # Acquire latest sensor & speed limit snapshot atomically
-                with data_lock:
-                    mpu = latest_mpu
-                    gps = latest_gps
-                    speed_limit = latest_speed_limit
-                    speed_source = latest_speed_source
+            try:
+                while not stop_event.is_set():                
+                    now = time.perf_counter()
+                    # To sleep through a cycle if 30 iterations finish early
+                    if now < next_sample_time:
+                        time.sleep(next_sample_time - now)
+                    next_sample_time += SAMPLE_INTERVAL
 
-                lat, lon, spd = gps
-                target_timestamp_ms = int(time.time() * 1000)
-                img_path = get_latest_image_for_timestamp(target_timestamp_ms)
-                readable_timestamp = datetime.fromtimestamp(target_timestamp_ms / 1000.0).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+                    # Acquire latest sensor & speed limit snapshot atomically
+                    with data_lock:
+                        mpu = latest_mpu
+                        gps = latest_gps
+                        speed_limit = latest_speed_limit
+                        speed_source = latest_speed_source
 
-                row = {
-                    'timestamp': readable_timestamp,
-                    'image_path': img_path or '',
-                    'acc_x': mpu[0], 'acc_y': mpu[1], 'acc_z': mpu[2],
-                    'gyro_x': mpu[3], 'gyro_y': mpu[4], 'gyro_z': mpu[5],
-                    'latitude': lat, 'longitude': lon,
-                    'speed': spd,
-                    'speed_limit': speed_limit
-                }
+                    lat, lon, spd = gps
+                    target_timestamp_ms = int(time.time() * 1000)
+                    img_path = get_latest_image_for_timestamp(target_timestamp_ms)
+                    readable_timestamp = datetime.fromtimestamp(target_timestamp_ms / 1000.0).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
 
-                # Poll only is_active flag at CONTROL_POLL_INTERVAL_S
-                t_wall = time.time()
-                if (t_wall - last_control_poll) >= CONTROL_POLL_INTERVAL_S:
-                    try:
-                        is_active, _calc = firebase_uploader.get_control_flags_for_ride(USER_ID, ride_id)
-                        current_is_active = is_active
-                    except Exception:
-                        pass  # retain previous state on failure
-                    last_control_poll = t_wall
+                    row = {
+                        'timestamp': readable_timestamp,
+                        'image_path': img_path or '',
+                        'acc_x': mpu[0], 'acc_y': mpu[1], 'acc_z': mpu[2],
+                        'gyro_x': mpu[3], 'gyro_y': mpu[4], 'gyro_z': mpu[5],
+                        'latitude': lat, 'longitude': lon,
+                        'speed': spd,
+                        'speed_limit': speed_limit
+                    }
 
-                # If not active, skip sampling/pushing but keep polling
-                if not current_is_active:
-                    # Enter inactive waiting state (blocking until re-activated)
-                    ride_id = wait_until_active(ride_id)
-                    # Reset timing anchor after idle to avoid large sleep adjustments
-                    next_sample_time = time.perf_counter() + SAMPLE_INTERVAL
-                    continue
+                    # Poll only is_active flag at CONTROL_POLL_INTERVAL_S
+                    t_wall = time.time()
+                    if (t_wall - last_control_poll) >= CONTROL_POLL_INTERVAL_S:
+                        try:
+                            is_active, _calc = firebase_uploader.get_control_flags_for_ride(USER_ID, ride_id)
+                            current_is_active = is_active
+                        except Exception:
+                            pass  # retain previous state on failure
+                        last_control_poll = t_wall
 
-                writer.writerow(row)
-                # Choose precision: more decimals for fallback ACCEL speed
-                if speed_source == "ACCEL":
-                    speed_str = f"{row['speed']:.{last_accel_decimals}f}"
-                else:
-                    speed_str = f"{row['speed']:.{last_accel_decimals}f}"
-                print(f"Logged: Time={row['timestamp']} Acc=({row['acc_x']},{row['acc_y']},{row['acc_z']}) Gyro=({row['gyro_x']},{row['gyro_y']},{row['gyro_z']}) "
-                      f"Lat={row['latitude']} Lon={row['longitude']} Speed={speed_str} km/h "
-                      f"SpeedLimit={row['speed_limit']} Src={speed_source} Image={os.path.basename(row['image_path']) if row['image_path'] else 'None'}")
-
-                if (time.time() - last_fb_push) >= FIREBASE_PUSH_INTERVAL_S:
-                    try:
-                        # Push latest MPU data if available
-                        if all(v is not None for v in mpu):
-                            firebase_uploader.update_rider_mpu(
-                                USER_ID,
-                                mpu[0], mpu[1], mpu[2],
-                                mpu[3], mpu[4], mpu[5],
-                                target_timestamp_ms
+                    # If not active, skip sampling/pushing but keep polling
+                    if not current_is_active:
+                        # Ride has ended - flush CSV and upload to Firebase
+                        print(f"\nRide {ride_id} ended. Uploading raw data to Firebase...")
+                        f.flush()  # Ensure all data is written to file
+                        
+                        try:
+                            # Upload the CSV file to Firebase
+                            upload_success = firebase_uploader.upload_raw_data_to_firebase(
+                                USER_ID, ride_id, csv_filename
                             )
-                        warnings = firebase_uploader.build_speeding_warning(spd, speed_limit)
-                        firebase_uploader.update_rider_speed(USER_ID, spd, speed_limit, warnings)
-                    except Exception as e:
-                        print(f"Firebase push error: {e}")
-                    last_fb_push = time.time()
+                            if upload_success:
+                                print(f"Raw data successfully uploaded for ride {ride_id}")
+                            else:
+                                print(f"Failed to upload raw data for ride {ride_id}")
+                        except Exception as e:
+                            print(f"Error uploading raw data: {e}")
+                        
+                        # Break out of the inner loop to close file and start new ride
+                        break
 
-        except KeyboardInterrupt:
-            print("\nStopping logging...")
-        finally:
-            stop_event.set()
-            for t in threads:
-                t.join(timeout=0.5)
-            if gps_serial:
-                try:
-                    gps_serial.close()
-                except Exception:
-                    pass
-            print("Log complete.")
+                    writer.writerow(row)
+                    # Choose precision: more decimals for fallback ACCEL speed
+                    if speed_source == "ACCEL":
+                        speed_str = f"{row['speed']:.{last_accel_decimals}f}"
+                    else:
+                        speed_str = f"{row['speed']:.{last_accel_decimals}f}"
+                    print(f"Logged: Time={row['timestamp']} Acc=({row['acc_x']},{row['acc_y']},{row['acc_z']}) Gyro=({row['gyro_x']},{row['gyro_y']},{row['gyro_z']}) "
+                          f"Lat={row['latitude']} Lon={row['longitude']} Speed={speed_str} km/h "
+                          f"SpeedLimit={row['speed_limit']} Src={speed_source} Image={os.path.basename(row['image_path']) if row['image_path'] else 'None'}")
+
+                    if (time.time() - last_fb_push) >= FIREBASE_PUSH_INTERVAL_S:
+                        try:
+                            # Push latest MPU data if available
+                            if all(v is not None for v in mpu):
+                                firebase_uploader.update_rider_mpu(
+                                    USER_ID,
+                                    mpu[0], mpu[1], mpu[2],
+                                    mpu[3], mpu[4], mpu[5],
+                                    target_timestamp_ms
+                                )
+                            warnings = firebase_uploader.build_speeding_warning(spd, speed_limit)
+                            firebase_uploader.update_rider_speed(USER_ID, spd, speed_limit, warnings)
+                        except Exception as e:
+                            print(f"Firebase push error: {e}")
+                        last_fb_push = time.time()
+
+            except KeyboardInterrupt:
+                print("\nStopping logging...")
+                break  # Break out of the ride loop
+    
+    # Cleanup on exit
+    stop_event.set()
+    for t in threads:
+        t.join(timeout=0.5)
+    if gps_serial:
+        try:
+            gps_serial.close()
+        except Exception:
+            pass
+    print("Log complete.")
             
 if __name__ == '__main__':
     main()
