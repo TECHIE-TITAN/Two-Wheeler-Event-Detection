@@ -203,7 +203,7 @@ def get_control_flags(user_id: str) -> Tuple[bool, bool]:
     return get_control_flags_for_ride(user_id, None)
 
 
-def get_control_flags_for_ride(user_id: str, ride_id: Optional[str]) -> Tuple[bool, bool]:
+def get_control_flags_for_ride(user_id: str, ride_id: Optional[str]) -> tuple[bool, bool]:
     """Returns (is_active, calculate_model) for a given ride_id.
     If ride_id is None, falls back to the top-level control locations.
     """
