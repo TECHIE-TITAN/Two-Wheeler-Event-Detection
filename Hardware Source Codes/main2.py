@@ -311,8 +311,8 @@ def main():
     # Wait for remote to set is_active True before starting (also acquires ride_id)
     ride_id = wait_until_active()
 
-    # Prepare CSV
-    csv_filename = CSV_FILENAME
+    # Prepare CSV with ride_id in filename
+    csv_filename = f"rawdata_{ride_id}.csv"
     fieldnames = [
         'timestamp', 'image_path', 'acc_x', 'acc_y', 'acc_z', 'gyro_x', 'gyro_y', 'gyro_z',
         'latitude', 'longitude', 'speed', 'speed_limit'
