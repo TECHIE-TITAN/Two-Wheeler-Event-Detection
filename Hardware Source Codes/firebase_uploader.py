@@ -122,23 +122,6 @@ def update_rider_mpu(
         return False
 
 
-def init_ride(user_id: str, start_timestamp_ms: int) -> bool:
-    # Legacy init_ride writes to a non-ride-scoped location. Keep for
-    # backward compatibility but prefer ride-scoped control paths.
-    url = f"{DB_URL}/users/{user_id}/rider_control.json?auth={_current_auth_token()}"
-    payload = {
-        "is_active": True,
-        "start_time": start_timestamp_ms,
-        "calculate_model": False
-    }
-    try:
-        response = requests.patch(url, json=payload, timeout=5)
-        return response.status_code == 200
-    except Exception as e:
-        print(f"Firebase ride init exception: {e}")
-        return False
-
-
 def init_ride_for_ride(user_id: str, ride_id: str, start_timestamp_ms: int) -> bool:
     """Initialize ride control status under a rides/{ride_id} path."""
     # New schema: rides/{ride_id}/ride_control contains control keys
@@ -162,8 +145,9 @@ def init_auth():
 
 # ---- Ride data uploads for new schema ----
 def upload_ride_raw_data_for_ride(user_id: str, ride_id: str, rows: list) -> bool:
-    """PUT the full array of CSV row dicts to users/{uid}/rides/{ride_id}/raw_data"""
+    """PUT the full array of CSV row dicts to users/{uid}/rides[ride_id]/raw_data"""
     try:
+        # rides is an array, so we access by index without /
         url = f"{DB_URL}/users/{user_id}/rides/{ride_id}/raw_data.json?auth={_current_auth_token()}"
         resp = requests.put(url, json=rows, timeout=20)
         return resp.status_code == 200
@@ -218,30 +202,49 @@ def get_control_flags_for_ride(user_id: str, ride_id: Optional[str]) -> tuple[bo
         resp = requests.get(_ride_status_url(user_id, True), timeout=5)
         if resp.status_code == 200:
             js = resp.json() or {}
-            return bool(js.get("is_active", False))
+            return bool(js.get("is_active", False)), False
     except Exception as e:
         print(f"Firebase get_control_flags_for_ride exception: {e}")
-    return False
+    return False, False
 
 
 def get_next_ride_id(user_id: str) -> str:
     """Return the next integer ride id as a string.
 
-    If no rides exist, returns "0". Otherwise returns str(max_id+1).
+    If no rides exist, returns "0". Otherwise reads from next_ride_id field.
     """
     try:
-        url = f"{DB_URL}/users/{user_id}/rides.json?auth={_current_auth_token()}"
+        url = f"{DB_URL}/users/{user_id}/next_ride_id.json?auth={_current_auth_token()}"
         resp = requests.get(url, timeout=8)
         if resp.status_code != 200:
             return "0"
-        js = resp.json() or {}
-        numeric_ids = [int(k) for k in js.keys() if k.isdigit()]
-        if not numeric_ids:
+        next_id = resp.json()
+        if next_id is None:
             return "0"
-        return str(max(numeric_ids))
+        return str(next_id)
     except Exception as e:
         print(f"Firebase get_next_ride_id exception: {e}")
         return "0"
+
+
+def increment_next_ride_id(user_id: str) -> bool:
+    """Increment the next_ride_id field in Firebase after starting a new ride."""
+    try:
+        # Get current value
+        url = f"{DB_URL}/users/{user_id}/next_ride_id.json?auth={_current_auth_token()}"
+        resp = requests.get(url, timeout=8)
+        if resp.status_code != 200:
+            current_id = 0
+        else:
+            current_id = resp.json() or 0
+        
+        # Increment and set
+        new_id = int(current_id) + 1
+        resp = requests.put(url, json=new_id, timeout=5)
+        return resp.status_code == 200
+    except Exception as e:
+        print(f"Firebase increment_next_ride_id exception: {e}")
+        return False
 
 
 def set_control_flag(user_id: str, field: str, value: bool, ride_id: Optional[str] = None) -> bool:

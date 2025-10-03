@@ -298,6 +298,8 @@ def main():
     try:
         ride_id = firebase_uploader.get_next_ride_id(USER_ID)
         print(f"Starting ride id: {ride_id}")
+        # Increment next_ride_id for the next ride
+        firebase_uploader.increment_next_ride_id(USER_ID)
     except Exception as e:
         print(f"Firebase ride init failed: {e}")
         ride_id = "0"
