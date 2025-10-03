@@ -27,6 +27,7 @@ last_speed_limit_fetch = 0.0
 stop_event = threading.Event()
 last_control_poll = 0.0
 current_is_active = False  # Only remaining control flag
+latest_speed_source = "UNKNOWN"  # Track whether speed from GPS or ACCEL fallback
 
 # Speed calculation buffers and state
 accel_buffer = []  # Buffer to store 1 second of acceleration data (30 samples)
@@ -136,7 +137,7 @@ def mpu_thread():
 
 def gps_thread(gps_serial):
     # Simplified: no consecutive error counting; always fallback to accel-derived speed on failure
-    global latest_gps, gps_last_update_time
+    global latest_gps, gps_last_update_time, latest_speed_source
     last_valid_gps_time = 0
     gps_read_count = 0
     valid_gps_count = 0
@@ -155,12 +156,14 @@ def gps_thread(gps_serial):
                     if len(gps_data) == 3:
                         latest_gps = gps_data  # (lat, lon, speed_kmh)
                         gps_last_update_time = time.time()
+                        latest_speed_source = "GPS"
                     else:
                         # Partial data (lat, lon only) -> compute fallback speed from acceleration
                         accel_speed_ms = calculate_speed_from_accel()
                         accel_speed_kmh = accel_speed_ms * 3.6
                         latest_gps = (gps_data[0], gps_data[1], accel_speed_kmh)
                         gps_last_update_time = time.time()
+                        latest_speed_source = "ACCEL"
                 # if valid_gps_count % 10 == 1:
                 #     lat, lon, speed = latest_gps
                 #     print(f"GPS Update #{valid_gps_count}: Lat={lat:.6f}, Lon={lon:.6f}, Speed={speed:.2f} km/h")
@@ -173,6 +176,7 @@ def gps_thread(gps_serial):
                 with data_lock:
                     latest_gps = (prev_lat, prev_lon, accel_speed_kmh)
                     gps_last_update_time = time.time()
+                    latest_speed_source = "ACCEL"
                 # if gps_read_count % 50 == 0:
                 #     time_since_last_fix = time.time() - last_valid_gps_time if last_valid_gps_time > 0 else 0
                 #     print(f"GPS Status: {gps_read_count} attempts, {valid_gps_count} valid. Last fix: {time_since_last_fix:.1f}s ago (ACCEL fallback {accel_speed_kmh:.2f} km/h)")
@@ -186,6 +190,7 @@ def gps_thread(gps_serial):
             with data_lock:
                 latest_gps = (prev_lat, prev_lon, accel_speed_kmh)
                 gps_last_update_time = time.time()
+                latest_speed_source = "ACCEL"
         time.sleep(0.2)
 
     print("GPS thread stopped.")
@@ -341,6 +346,7 @@ def main():
                     mpu = latest_mpu
                     gps = latest_gps
                     speed_limit = latest_speed_limit
+                    speed_source = latest_speed_source
 
                 lat, lon, spd = gps
                 target_timestamp_ms = int(time.time() * 1000)
@@ -375,9 +381,14 @@ def main():
                     continue
 
                 writer.writerow(row)
+                # Choose precision: more decimals for fallback ACCEL speed
+                if speed_source == "ACCEL":
+                    speed_str = f"{row['speed']:.7f}"
+                else:
+                    speed_str = f"{row['speed']:.7f}"
                 print(f"Logged: Time={row['timestamp']} Acc=({row['acc_x']},{row['acc_y']},{row['acc_z']}) Gyro=({row['gyro_x']},{row['gyro_y']},{row['gyro_z']}) "
-                      f"Lat={row['latitude']} Lon={row['longitude']} Speed={row['speed']:.2f} km/h "
-                      f"SpeedLimit={row['speed_limit']} Image={os.path.basename(row['image_path']) if row['image_path'] else 'None'}")
+                      f"Lat={row['latitude']} Lon={row['longitude']} Speed={speed_str} km/h "
+                      f"SpeedLimit={row['speed_limit']} Src={speed_source} Image={os.path.basename(row['image_path']) if row['image_path'] else 'None'}")
 
                 if (time.time() - last_fb_push) >= FIREBASE_PUSH_INTERVAL_S:
                     try:
