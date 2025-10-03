@@ -13,7 +13,7 @@ SAMPLE_INTERVAL = 1.0 / TARGET_HZ
 OLA_MAPS_API_KEY = "50c25aHLICdWQ4JbXp2MZwgmliGxvqJ8os1MOYe3"
 SPEED_LIMIT_REFRESH_S = 1.0  
 FIREBASE_PUSH_INTERVAL_S = 1.0
-USER_ID = "WlDdtoNgVNc3pEEHzWkKthuTLXF2"
+USER_ID = "ocadXHESmIZ8TUHfzN2ZYKV51os2"
 CONTROL_POLL_INTERVAL_S = 0.5
 
 IMAGE_DIR = "captured_images/"
@@ -34,41 +34,6 @@ current_speed_ms = 0.0  # Current speed in m/s
 speed_calculation_lock = threading.Lock()
 gps_last_update_time = 0.0  # Track when GPS was last successfully updated
 GPS_TIMEOUT_SECONDS = 5.0  # Consider GPS stale after 5 seconds without update
-
-
-def model_calculation(ride_id: str):
-    """Read the entire CSV and upload as JSON to Firebase under raw_data for the ride.
-
-    After successful upload, caller is responsible for toggling calculate_model off.
-    This implementation keeps image upload disabled but will include the image_path
-    field in each row as read from CSV. Fields with empty strings are left as-is.
-    """
-    csv_file = CSV_FILENAME
-    if not os.path.isfile(csv_file):
-        print(f"model_calculation: CSV file {csv_file} not found, nothing to upload.")
-        return
-
-    rows = []
-    try:
-        with open(csv_file, 'r', newline='') as f:
-            reader = csv.DictReader(f)
-            for r in reader:
-                # Keep CSV string values as-is; they can be post-processed by server/model
-                rows.append(r)
-    except Exception as e:
-        print(f"model_calculation: failed to read CSV: {e}")
-        return
-
-    # Upload to Firebase under users/{uid}/rides/{ride_id}/raw_data
-    try:
-        success = firebase_uploader.upload_ride_raw_data_for_ride(USER_ID, ride_id, rows)
-        if success:
-            print(f"model_calculation: uploaded {len(rows)} rows to ride {ride_id} raw_data")
-        else:
-            print("model_calculation: upload failed")
-    except Exception as e:
-        print(f"model_calculation: upload exception: {e}")
-
 
 def add_accel_to_buffer(acc_x):
     """Add acceleration data to buffer and maintain 1-second window (30 samples)"""
