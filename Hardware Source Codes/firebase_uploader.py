@@ -193,7 +193,7 @@ def _ride_status_url(user_id: str, prefer_top_level: bool = True) -> str:
     return f"{DB_URL}/users/{user_id}/rider_control.json?auth={_current_auth_token()}"
 
 
-def get_control_flags(user_id: str) -> Tuple[bool, bool]:
+def get_control_flags(user_id: str) -> tuple[bool, bool]:
     """
     Returns (is_active, calculate_model) from Realtime DB.
     Tries top-level path first, then falls back to /users path.
