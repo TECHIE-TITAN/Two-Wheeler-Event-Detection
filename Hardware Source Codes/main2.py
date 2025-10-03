@@ -243,21 +243,19 @@ def wait_until_active(ride_id: str | None = None, poll_interval: float = 0.5):
     """
     global current_is_active, last_control_poll
 
-    # Acquire ride id if not supplied
-    if ride_id is None:
+    print("Waiting for ride to be activated remotely...")
+    while not stop_event.is_set() and not current_is_active:
+        # Acquire ride id if not supplied
         try:
             ride_id = firebase_uploader.get_next_ride_id(USER_ID)
             print(f"Starting ride id: {ride_id}")
-            firebase_uploader.increment_next_ride_id(USER_ID)
         except Exception as e:
             print(f"Firebase ride init failed: {e}")
             ride_id = "0"
 
-    if current_is_active:
-        return ride_id
-
-    print("Waiting for ride to be activated remotely...")
-    while not stop_event.is_set() and not current_is_active:
+        if current_is_active:
+            return ride_id
+        
         try:
             is_active, _calc = firebase_uploader.get_control_flags_for_ride(USER_ID, ride_id)
             if is_active:
