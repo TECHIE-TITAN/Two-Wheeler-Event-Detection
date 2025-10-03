@@ -26,9 +26,7 @@ latest_speed_limit = None
 last_speed_limit_fetch = 0.0
 stop_event = threading.Event()
 last_control_poll = 0.0
-prev_calc_model = False
-current_is_active = False
-current_calc_model = False
+current_is_active = False  # Only remaining control flag
 
 # Speed calculation buffers and state
 accel_buffer = []  # Buffer to store 1 second of acceleration data (30 samples)
@@ -36,20 +34,6 @@ current_speed_ms = 0.0  # Current speed in m/s
 speed_calculation_lock = threading.Lock()
 gps_last_update_time = 0.0  # Track when GPS was last successfully updated
 GPS_TIMEOUT_SECONDS = 5.0  # Consider GPS stale after 5 seconds without update
-
-
-def model_calculation(ride_id: str):
-    """Read the entire CSV and upload as JSON to Firebase ride_data.
-    After successful upload, calculate_model will be toggled false by caller.
-    """
-    # CSV/image uploads have been disabled by configuration.
-    # The original behavior read the CSV, uploaded images as base64 and
-    # PUT the entire ride_data array to Firebase. To keep only live
-    # sensor telemetry (MPU/GPS/speed/speed_limit) being pushed, we
-    # intentionally skip reading or uploading the CSV and images here.
-    print("model_calculation() called, but CSV and image uploads are disabled in this build.")
-    # Caller will toggle calculate_model off and may pause collection as before.
-    return
 
 
 def add_accel_to_buffer(acc_x):
@@ -64,7 +48,6 @@ def add_accel_to_buffer(acc_x):
         # Keep only last 30 samples (1 second at 30Hz)
         if len(accel_buffer) > TARGET_HZ:
             accel_buffer = accel_buffer[-TARGET_HZ:]
-
 
 def calculate_speed_from_accel():
     """Calculate speed using average acceleration over 1 second and v = u + at"""
@@ -92,12 +75,10 @@ def calculate_speed_from_accel():
         new_speed_ms = max(0.0, new_speed_ms)
         
         # Apply reasonable speed limits (max ~200 km/h = ~55.6 m/s)
-        new_speed_ms = min(55.6, new_speed_ms)
+        # new_speed_ms = min(55.6, new_speed_ms)
         
         current_speed_ms = new_speed_ms
-        
         return current_speed_ms
-
 
 def get_final_speed_kmh():
     """
@@ -141,7 +122,6 @@ def get_final_speed_kmh():
         else:
             return accel_speed_kmh, "ACCEL"
 
-
 def mpu_thread():
     global latest_mpu
     while not stop_event.is_set():
@@ -155,66 +135,83 @@ def mpu_thread():
             
         time.sleep(0.005)
 
-
 def gps_thread(gps_serial):
+    # Simplified: no consecutive error counting; always fallback to accel-derived speed on failure
     global latest_gps, gps_last_update_time
     last_valid_gps_time = 0
     gps_read_count = 0
     valid_gps_count = 0
-    consecutive_errors = 0
-    max_consecutive_errors = 5  # Reset GPS data after 5 consecutive errors
-    
+
     print("GPS thread started...")
-    
+
     while not stop_event.is_set():
         try:
             gps_data = gps_utils.get_gps_data(gps_serial)
             gps_read_count += 1
-            
+
             if gps_data and gps_data != (None, None, None):
                 valid_gps_count += 1
                 last_valid_gps_time = time.time()
-                consecutive_errors = 0  # Reset error counter on successful read
-                
                 with data_lock:
                     if len(gps_data) == 3:
-                        latest_gps = gps_data
-                        gps_last_update_time = time.time()  # Update GPS timestamp
+                        latest_gps = gps_data  # (lat, lon, speed_kmh)
+                        gps_last_update_time = time.time()
                     else:
-                        latest_gps = (gps_data[0], gps_data[1], None)
-                        gps_last_update_time = time.time()  # Update GPS timestamp even without speed
-                
-                # Print GPS data every 10 valid readings for debugging
-                if valid_gps_count % 10 == 1:
-                    lat, lon, speed = gps_data
-                    print(f"GPS Update #{valid_gps_count}: Lat={lat:.6f}, Lon={lon:.6f}, Speed={speed:.2f} km/h")
+                        # Partial data (lat, lon only) -> compute fallback speed from acceleration
+                        accel_speed_ms = calculate_speed_from_accel()
+                        accel_speed_kmh = accel_speed_ms * 3.6
+                        latest_gps = (gps_data[0], gps_data[1], accel_speed_kmh)
+                        gps_last_update_time = time.time()
+                # if valid_gps_count % 10 == 1:
+                #     lat, lon, speed = latest_gps
+                #     print(f"GPS Update #{valid_gps_count}: Lat={lat:.6f}, Lon={lon:.6f}, Speed={speed:.2f} km/h")
             else:
-                # GPS data is None or invalid - reset GPS data to force accelerometer fallback
+                # Invalid reading: keep last lat/lon, compute speed from accelerometer
                 with data_lock:
-                    latest_gps = (latest_gps[0], latest_gps[1], None)
-                
-                # Print status every 50 failed attempts
-                if gps_read_count % 50 == 0:
-                    time_since_last_fix = time.time() - last_valid_gps_time if last_valid_gps_time > 0 else 0
-                    print(f"GPS Status: {gps_read_count} attempts, {valid_gps_count} valid readings. "
-                          f"Last fix: {time_since_last_fix:.1f}s ago")
-                    
+                    prev_lat, prev_lon, _prev_speed = latest_gps
+                accel_speed_ms = calculate_speed_from_accel()
+                accel_speed_kmh = accel_speed_ms * 3.6
+                with data_lock:
+                    latest_gps = (prev_lat, prev_lon, accel_speed_kmh)
+                    gps_last_update_time = time.time()
+                # if gps_read_count % 50 == 0:
+                #     time_since_last_fix = time.time() - last_valid_gps_time if last_valid_gps_time > 0 else 0
+                #     print(f"GPS Status: {gps_read_count} attempts, {valid_gps_count} valid. Last fix: {time_since_last_fix:.1f}s ago (ACCEL fallback {accel_speed_kmh:.2f} km/h)")
         except Exception as e:
-            print(f"GPS thread error: {e}")
-            consecutive_errors += 1
-            
-            # Immediately reset GPS data on any I/O error to force accelerometer fallback
+            # On any exception: fallback speed using accelerometer; preserve last lat/lon
+            print(f"GPS thread error (fallback to accel): {e}")
             with data_lock:
-                latest_gps = (latest_gps[0], latest_gps[1], None)
-
-            # After multiple consecutive errors, warn user
-            if consecutive_errors >= max_consecutive_errors:
-                print(f"GPS: {consecutive_errors} consecutive errors - using accelerometer speed calculation")
-            
+                prev_lat, prev_lon, _prev_speed = latest_gps
+            accel_speed_ms = calculate_speed_from_accel()
+            accel_speed_kmh = accel_speed_ms * 3.6
+            with data_lock:
+                latest_gps = (prev_lat, prev_lon, accel_speed_kmh)
+                gps_last_update_time = time.time()
         time.sleep(0.2)
-    
+
     print("GPS thread stopped.")
 
+def speed_limit_thread():
+    """Background thread to periodically fetch speed limit using latest GPS coords.
+    Respects SPEED_LIMIT_REFRESH_S interval. Safe to run even without GPS (it will idle)."""
+    global latest_speed_limit, last_speed_limit_fetch
+    while not stop_event.is_set():
+        try:
+            with data_lock:
+                gps = latest_gps
+            lat, lon, _ = gps
+            if lat is not None and lon is not None:
+                now = time.time()
+                if (latest_speed_limit is None) or (now - last_speed_limit_fetch >= SPEED_LIMIT_REFRESH_S):
+                    sl = speed_limit_utils.get_speed_limit(lat, lon, OLA_MAPS_API_KEY)
+                    with data_lock:
+                        latest_speed_limit = sl
+                        last_speed_limit_fetch = now
+        except Exception as e:
+            # Silent or minimal logging to avoid spamming
+            print(f"Speed limit thread error: {e}")
+        # Sleep a short amount; main gating is interval check above
+        time.sleep(0.2)
 
 def get_latest_image_for_timestamp(target_timestamp_ms):
     # List all image files in IMAGE_DIR
@@ -240,9 +237,27 @@ def get_latest_image_for_timestamp(target_timestamp_ms):
 
     return best_image
 
+def wait_until_active(ride_id: str, poll_interval: float = 0.5):
+    """Block in an inactive state until remote re-activates the ride or stop_event set.
+    Periodically polls Firebase for the is_active flag.
+    """
+    global current_is_active, last_control_poll
+    while not stop_event.is_set() and not current_is_active:
+        try:
+            is_active = firebase_uploader.get_control_flags_for_ride(USER_ID, ride_id)
+            if is_active:
+                current_is_active = True
+                print("Ride re-activated. Resuming logging.")
+                break
+        except Exception:
+            pass
+        time.sleep(0.5)
+        last_control_poll = time.time()
 
 def main():
-    global latest_speed_limit, last_speed_limit_fetch
+    global latest_speed_limit, last_speed_limit_fetch, current_is_active, last_control_poll
+
+    # Initialize and Authenticate Firebase
     try:
         firebase_uploader.init_auth()
     except Exception as e:
@@ -273,6 +288,9 @@ def main():
     else:
         print("Warning: GPS thread not started due to initialization failure")
     
+    # Start speed limit fetcher thread always (it self-idles without GPS)
+    threads.append(threading.Thread(target=speed_limit_thread, daemon=True))
+    
     for t in threads:
         t.start()
     print(f"Started {len(threads)} sensor threads.")
@@ -281,9 +299,12 @@ def main():
     try:
         ride_id = firebase_uploader.get_next_ride_id(USER_ID)
         print(f"Starting ride id: {ride_id}")
-        firebase_uploader.init_ride_for_ride(USER_ID, ride_id, int(time.time() * 1000))
     except Exception as e:
         print(f"Firebase ride init failed: {e}")
+        ride_id = "0"
+
+    # Wait for remote to set is_active True before starting
+    wait_until_active(ride_id)
 
     # Prepare CSV
     csv_filename = CSV_FILENAME
@@ -302,77 +323,24 @@ def main():
         last_fb_push = 0.0
 
         try:
-            while not stop_event.is_set():
+            while not stop_event.is_set():                
                 now = time.perf_counter()
+                # To sleep through a cycle if 30 iterations finish early
                 if now < next_sample_time:
                     time.sleep(next_sample_time - now)
                 next_sample_time += SAMPLE_INTERVAL
 
+                # Acquire latest sensor & speed limit snapshot atomically
                 with data_lock:
                     mpu = latest_mpu
                     gps = latest_gps
+                    speed_limit = latest_speed_limit
 
                 lat, lon, spd = gps
-
-                # Calculate final speed using our priority system
-                final_speed_kmh, speed_source = get_final_speed_kmh()
-                
-                # Use the final calculated speed instead of raw GPS speed
-                spd = final_speed_kmh
-                
-                # Debug: Print speed source every 10 seconds (300 samples at 30Hz)
-                if (time.time() % 10) < SAMPLE_INTERVAL:  # Print approximately every 10 seconds
-                    print(f"Speed: {spd:.2f} km/h (Source: {speed_source})")
-
-                # Poll Firebase control flags periodically
-                global last_control_poll, prev_calc_model, current_is_active, current_calc_model
-                t_wall = time.time()
-                if (t_wall - last_control_poll) >= CONTROL_POLL_INTERVAL_S:
-                    try:
-                        is_active, calc_model = firebase_uploader.get_control_flags_for_ride(USER_ID, ride_id)
-                    except Exception as _:
-                        is_active, calc_model = current_is_active, current_calc_model
-                    last_control_poll = t_wall
-
-                    # Edge-trigger for calculate_model -> True
-                    if calc_model and not prev_calc_model:
-                        try:
-                            # Stop active loop after calculation by flipping is_active to False
-                            model_calculation(ride_id)
-                        finally:
-                            firebase_uploader.toggle_calculate_model_off(USER_ID, ride_id=ride_id)
-                            # Force pause: require remote to set is_active True again
-                            try:
-                                firebase_uploader.set_control_flag(USER_ID, "is_active", False, ride_id=ride_id)
-                            except Exception as _:
-                                pass
-                    prev_calc_model = calc_model
-                    current_is_active = is_active
-                    current_calc_model = calc_model
-
-                # If not active, skip sampling/pushing but keep polling
-                if not current_is_active:
-                    # Small idle sleep to reduce CPU when inactive
-                    time.sleep(0.2)
-                    continue
-
-                # Debug GPS data periodically
-                if lat is not None and lon is not None:
-                    # Print GPS status every 30 seconds
-                    if int(time.time()) % 30 == 0 and int(time.time() * 10) % 10 == 0:  # Once per 30s
-                        print(f"GPS Status: Lat={lat:.6f}, Lon={lon:.6f}, Speed={spd:.2f} km/h ({speed_source})")
-                    
-                    t_now = time.time()
-                    if (latest_speed_limit is None) or (t_now - last_speed_limit_fetch >= SPEED_LIMIT_REFRESH_S):
-                        latest_speed_limit = speed_limit_utils.get_speed_limit(lat, lon, OLA_MAPS_API_KEY)
-                        last_speed_limit_fetch = t_now
-                else:
-                    # Print accelerometer-only speed calculation status periodically  
-                    if int(time.time()) % 30 == 0 and int(time.time() * 10) % 10 == 0:  # Once per 30s
-                        print(f"No GPS - Speed: {spd:.2f} km/h ({speed_source})")
-                        with speed_calculation_lock:
-                            print(f"Accel buffer size: {len(accel_buffer)} samples")
-
+                # """--------------------- Change this logic ---------------------"""
+                # # Calculate final speed using our priority system
+                # spd, speed_source = get_final_speed_kmh()
+                # """-------------------------------------------------------------"""
                 target_timestamp_ms = int(time.time() * 1000)
                 img_path = get_latest_image_for_timestamp(target_timestamp_ms)
 
@@ -383,12 +351,31 @@ def main():
                     'gyro_x': mpu[3], 'gyro_y': mpu[4], 'gyro_z': mpu[5],
                     'latitude': lat, 'longitude': lon,
                     'speed': spd,
-                    'speed_limit': latest_speed_limit
+                    'speed_limit': speed_limit
                 }
 
+                # Poll only is_active flag at CONTROL_POLL_INTERVAL_S
+                t_wall = time.time()
+                if (t_wall - last_control_poll) >= CONTROL_POLL_INTERVAL_S:
+                    try:
+                        current_is_active = firebase_uploader.get_control_flags_for_ride(USER_ID, ride_id)
+                    except Exception:
+                        pass  # retain previous state on failure
+                    last_control_poll = t_wall
+
+                # If not active, skip sampling/pushing but keep polling
+                if not current_is_active:
+                    # Enter inactive waiting state (blocking until re-activated)
+                    wait_until_active(ride_id)
+                    # Reset timing anchor after idle to avoid large sleep adjustments
+                    next_sample_time = time.perf_counter() + SAMPLE_INTERVAL
+                    continue
+
                 writer.writerow(row)
-                if int(row['timestamp']) % 5 == 0:
-                    f.flush()
+                # if int(row['timestamp']) % 5 == 0:
+                #     f.flush()
+                # if int(row['timestamp']) % 5 == 0:
+                #     f.flush()
 
                 if (time.time() - last_fb_push) >= FIREBASE_PUSH_INTERVAL_S:
                     try:
@@ -400,8 +387,8 @@ def main():
                                 mpu[3], mpu[4], mpu[5],
                                 target_timestamp_ms
                             )
-                        warnings = firebase_uploader.build_speeding_warning(spd, latest_speed_limit)
-                        firebase_uploader.update_rider_speed(USER_ID, spd, latest_speed_limit, warnings)
+                        warnings = firebase_uploader.build_speeding_warning(spd, speed_limit)
+                        firebase_uploader.update_rider_speed(USER_ID, spd, speed_limit, warnings)
                     except Exception as e:
                         print(f"Firebase push error: {e}")
                     last_fb_push = time.time()
@@ -418,7 +405,6 @@ def main():
                 except Exception:
                     pass
             print("Log complete.")
-
-
+            
 if __name__ == '__main__':
     main()

@@ -95,16 +95,16 @@ def get_gps_data(gps_serial):
             line = gps_serial.readline().decode("ascii", errors="ignore").strip()
             lines_read += 1
             
-            if DEBUG_GPS and line:
-                print(f"GPS Raw: {line}")
+            # if DEBUG_GPS and line:
+            #     print(f"GPS Raw: {line}")
 
             if line.startswith("$GPRMC"):
                 parts = line.split(",")
                 
-                if DEBUG_GPS:
-                    print(f"GPRMC parts count: {len(parts)}")
-                    if len(parts) > 2:
-                        print(f"GPS Status: {parts[2]} (A=Active, V=Void)")
+                # if DEBUG_GPS:
+                #     print(f"GPRMC parts count: {len(parts)}")
+                #     if len(parts) > 2:
+                #         print(f"GPS Status: {parts[2]} (A=Active, V=Void)")
                 
                 # Check for basic validity: enough parts and 'A' status
                 if len(parts) >= 10:
@@ -118,8 +118,8 @@ def get_gps_data(gps_serial):
                     course = parts[8]
                     date = parts[9]
                     
-                    if DEBUG_GPS:
-                        print(f"GPS Data - Status: {status}, Lat: {lat_raw}{lat_dir}, Lon: {lon_raw}{lon_dir}, Speed: {speed_knots}kn")
+                    # if DEBUG_GPS:
+                    #     print(f"GPS Data - Status: {status}, Lat: {lat_raw}{lat_dir}, Lon: {lon_raw}{lon_dir}, Speed: {speed_knots}kn")
                     
                     # Check if GPS has a valid fix
                     if status == 'A' and lat_raw and lon_raw and lat_dir and lon_dir:
@@ -129,8 +129,8 @@ def get_gps_data(gps_serial):
                         speed_kmh = float(speed_knots) * KNOTS_TO_KMH if speed_knots else 0.0
 
                         if latitude is not None and longitude is not None:
-                            if DEBUG_GPS:
-                                print(f"GPS Parsed - Lat: {latitude:.6f}, Lon: {longitude:.6f}, Speed: {speed_kmh:.2f} km/h")
+                            # if DEBUG_GPS:
+                            #     print(f"GPS Parsed - Lat: {latitude:.6f}, Lon: {longitude:.6f}, Speed: {speed_kmh:.2f} km/h")
                             return (latitude, longitude, speed_kmh)
                     elif status == 'V':
                         if DEBUG_GPS:
@@ -140,8 +140,8 @@ def get_gps_data(gps_serial):
                             print(f"GPS Status: Invalid data - Status: {status}, Lat: {lat_raw}, Lon: {lon_raw}")
 
         # If no valid $GPRMC sentence was found after trying
-        if DEBUG_GPS:
-            print(f"No valid GPS data found after reading {lines_read} lines")
+        # if DEBUG_GPS:
+        #     print(f"No valid GPS data found after reading {lines_read} lines")
         return (None, None, None)
 
     except (serial.SerialException, ValueError, IndexError) as e:
