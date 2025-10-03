@@ -120,21 +120,6 @@ def update_rider_mpu(
         return False
 
 
-def init_ride_for_ride(user_id: str, ride_id: str, start_timestamp_ms: int) -> bool:
-    """Initialize ride control status for a ride (only is_active retained)."""
-    url = f"{DB_URL}/users/{user_id}/rides/{ride_id}/rider_control/ride_status.json?auth={_current_auth_token()}"
-    payload = {
-        "is_active": True,
-        "start_timestamp": start_timestamp_ms
-    }
-    try:
-        response = requests.patch(url, json=payload, timeout=5)
-        return response.status_code == 200
-    except Exception as e:
-        print(f"Firebase init_ride_for_ride exception: {e}")
-        return False
-
-
 def init_auth():
     _sign_in_email_password()
 
@@ -142,7 +127,7 @@ def init_auth():
 def get_control_flags_for_ride(user_id: str, ride_id: str) -> bool:
     """Return is_active flag for the specified ride. calculate_model removed."""
     try:
-        url = f"{DB_URL}/users/{user_id}/rides/{ride_id}/rider_control/ride_status.json?auth={_current_auth_token()}"
+        url = f"{DB_URL}/users/{user_id}/rides/{ride_id}/ride_control.json?auth={_current_auth_token()}"
         resp = requests.get(url, timeout=5)
         if resp.status_code == 200:
             js = resp.json() or {}
@@ -166,22 +151,7 @@ def get_next_ride_id(user_id: str) -> str:
         numeric_ids = [int(k) for k in js.keys() if k.isdigit()]
         if not numeric_ids:
             return "0"
-        return str(max(numeric_ids) + 1)
+        return str(max(numeric_ids))
     except Exception as e:
         print(f"Firebase get_next_ride_id exception: {e}")
         return "0"
-
-
-def set_control_flag(user_id: str, field: str, value: bool, ride_id: Optional[str] = None) -> bool:
-    """Set a boolean field under ride_status for a ride. Legacy fallbacks removed.
-    ride_id is now required for writes (returns False if absent)."""
-    if not ride_id:
-        return False
-    payload = {field: bool(value)}
-    try:
-        url = f"{DB_URL}/users/{user_id}/rides/{ride_id}/rider_control/ride_status.json?auth={_current_auth_token()}"
-        r = requests.patch(url, json=payload, timeout=5)
-        return r.status_code == 200
-    except Exception as e:
-        print(f"Firebase set_control_flag exception: {e}")
-        return False
