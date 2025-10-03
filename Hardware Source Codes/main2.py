@@ -241,6 +241,7 @@ def wait_until_active(ride_id: str, poll_interval: float = 0.5):
     Periodically polls Firebase for the is_active flag.
     """
     global current_is_active, last_control_poll
+    print("Waiting for ride to be activated remotely...")
     while not stop_event.is_set() and not current_is_active:
         try:
             is_active = firebase_uploader.get_control_flags_for_ride(USER_ID, ride_id)
@@ -373,6 +374,9 @@ def main():
                     continue
 
                 writer.writerow(row)
+                print(f"Logged: Time={row['timestamp']} Acc=({row['acc_x']},{row['acc_y']},{row['acc_z']}) Gyro=({row['gyro_x']},{row['gyro_y']},{row['gyro_z']}) "
+                      f"Lat={row['latitude']} Lon={row['longitude']} Speed={row['speed']:.2f} km/h "
+                      f"SpeedLimit={row['speed_limit']} Image={os.path.basename(row['image_path']) if row['image_path'] else 'None'}")
                 # if int(row['timestamp']) % 5 == 0:
                 #     f.flush()
                 # if int(row['timestamp']) % 5 == 0:
