@@ -4,6 +4,7 @@ import os
 import threading
 import glob
 from collections import deque  # Added for fixed-size acceleration buffer
+from datetime import datetime  # Added for readable timestamp formatting
 import mpu_utils  # type: ignore
 import gps_utils  # type: ignore
 import speed_limit_utils  # type: ignore
@@ -344,9 +345,10 @@ def main():
                 lat, lon, spd = gps
                 target_timestamp_ms = int(time.time() * 1000)
                 img_path = get_latest_image_for_timestamp(target_timestamp_ms)
+                readable_timestamp = datetime.fromtimestamp(target_timestamp_ms / 1000.0).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
 
                 row = {
-                    'timestamp': target_timestamp_ms,
+                    'timestamp': readable_timestamp,
                     'image_path': img_path or '',
                     'acc_x': mpu[0], 'acc_y': mpu[1], 'acc_z': mpu[2],
                     'gyro_x': mpu[3], 'gyro_y': mpu[4], 'gyro_z': mpu[5],
