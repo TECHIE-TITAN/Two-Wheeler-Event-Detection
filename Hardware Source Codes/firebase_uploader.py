@@ -7,7 +7,7 @@ DB_URL = "https://wheeler-event-detection-default-rtdb.asia-southeast1.firebased
 _API_KEY = "AIzaSyA__tMBGiQ-PVqyvv9kvNHaSUJk2QPXU-c"
 _EMAIL = "rpi@example.com"
 _PASSWORD = "rpi123456"
-DEFAULT_USER_ID = "ocadXHESmIZ8TUHfzN2ZYKV51os2"
+DEFAULT_USER_ID = "OYFNMBRHiPduTdplwnSIa2dxdwx1"
 
 # Auth state
 _ID_TOKEN: Optional[str] = None
