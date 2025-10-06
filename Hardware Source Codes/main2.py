@@ -10,7 +10,7 @@ import gps_utils  # type: ignore
 import speed_limit_utils  # type: ignore
 import firebase_uploader  # type: ignore
 
-TARGET_HZ = 30
+TARGET_HZ = 100
 SAMPLE_INTERVAL = 1.0 / TARGET_HZ
 OLA_MAPS_API_KEY = "50c25aHLICdWQ4JbXp2MZwgmliGxvqJ8os1MOYe3"
 SPEED_LIMIT_REFRESH_S = 1.0  
@@ -185,7 +185,7 @@ def gps_thread(gps_serial):
                 latest_gps = (prev_lat, prev_lon, accel_speed_kmh)
                 gps_last_update_time = time.time()
                 latest_speed_source = "ACCEL"
-        time.sleep(0.2)
+        time.sleep(0.01)
 
     print("GPS thread stopped.")
 
