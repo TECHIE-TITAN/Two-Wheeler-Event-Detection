@@ -149,41 +149,6 @@ def get_gps_data(gps_serial):
         return (None, None, None)
 
 
-def get_gps_data_nonblocking(gps_serial):
-    """Non-blocking GPS data read - returns immediately if no data available"""
-    try:
-        # Check if data is available without blocking
-        if gps_serial.in_waiting == 0:
-            return (None, None, None)
-            
-        # Read only what's immediately available
-        line = gps_serial.readline().decode("ascii", errors="ignore").strip()
-        
-        if line.startswith("$GPRMC"):
-            parts = line.split(",")
-            
-            if len(parts) >= 10:
-                status = parts[2]
-                lat_raw = parts[3]
-                lat_dir = parts[4]
-                lon_raw = parts[5]
-                lon_dir = parts[6]
-                speed_knots = parts[7]
-                
-                if status == 'A' and lat_raw and lon_raw and lat_dir and lon_dir:
-                    latitude = _parse_lat_lon(lat_raw, lat_dir)
-                    longitude = _parse_lat_lon(lon_raw, lon_dir)
-                    speed_kmh = float(speed_knots) * KNOTS_TO_KMH if speed_knots else 0.0
-
-                    if latitude is not None and longitude is not None:
-                        return (latitude, longitude, speed_kmh)
-        
-        return (None, None, None)
-        
-    except Exception as e:
-        return (None, None, None)
-
-
 def test_gps_connection(port=GPS_PORT, baud=GPS_BAUD, duration=30):
     """
     Test GPS connection and print raw data for debugging.
