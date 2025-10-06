@@ -185,7 +185,7 @@ def gps_thread(gps_serial):
                 latest_gps = (prev_lat, prev_lon, accel_speed_kmh)
                 gps_last_update_time = time.time()
                 latest_speed_source = "ACCEL"
-        time.sleep(0.2)
+        time.sleep(0.01)
 
     print("GPS thread stopped.")
 
