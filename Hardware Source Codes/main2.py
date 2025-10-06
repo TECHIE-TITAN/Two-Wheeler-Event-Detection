@@ -10,13 +10,13 @@ import gps_utils  # type: ignore
 import speed_limit_utils  # type: ignore
 import firebase_uploader  # type: ignore
 
-TARGET_HZ = 100
+TARGET_HZ = 1000
 SAMPLE_INTERVAL = 1.0 / TARGET_HZ
 OLA_MAPS_API_KEY = "50c25aHLICdWQ4JbXp2MZwgmliGxvqJ8os1MOYe3"
 SPEED_LIMIT_REFRESH_S = 50.0 
-FIREBASE_PUSH_INTERVAL_S = 30.0
+FIREBASE_PUSH_INTERVAL_S = 7.0
 USER_ID = "OYFNMBRHiPduTdplwnSIa2dxdwx1"
-CONTROL_POLL_INTERVAL_S = 30.0
+CONTROL_POLL_INTERVAL_S = 10.0
 
 IMAGE_DIR = "captured_images/"
 CSV_FILENAME = "sensor_data.csv"

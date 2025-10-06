@@ -14,7 +14,7 @@ class CameraManager:
         config = self.picam2.create_preview_configuration(main={"size": resolution})
         self.picam2.configure(config)
         self.picam2.start()
-        time.sleep(0.2)
+        time.sleep(0.01)
 
     def capture_image(self, prefix="frame"):
         try:
