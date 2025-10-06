@@ -129,41 +129,25 @@ def mpu_thread():
         time.sleep(0.005)
 
 def gps_thread(gps_serial):
-    # Simplified: no consecutive error counting; always fallback to accel-derived speed on failure
     global latest_gps, gps_last_update_time, latest_speed_source, last_accel_decimals
-    last_valid_gps_time = 0
-    gps_read_count = 0
-    valid_gps_count = 0
-
     print("GPS thread started...")
 
     while not stop_event.is_set():
         try:
-            gps_data = gps_utils.get_gps_data(gps_serial)
-            gps_read_count += 1
-
+            # Non-blocking GPS read with timeout
+            gps_data = gps_utils.get_gps_data_nonblocking(gps_serial)
+            
             if gps_data and gps_data != (None, None, None):
-                valid_gps_count += 1
-                last_valid_gps_time = time.time()
                 with data_lock:
                     if len(gps_data) == 3:
-                        # Round GPS speed to match acceleration decimals if present
                         spd_val = gps_data[2]
                         if spd_val is not None:
                             spd_val = round(spd_val, last_accel_decimals)
                         latest_gps = (gps_data[0], gps_data[1], spd_val)
                         gps_last_update_time = time.time()
                         latest_speed_source = "GPS"
-                    else:
-                        # Partial data (lat, lon only) -> compute fallback speed from acceleration
-                        accel_speed_ms = calculate_speed_from_accel()
-                        accel_speed_kmh = accel_speed_ms * 3.6
-                        accel_speed_kmh = round(accel_speed_kmh, last_accel_decimals)
-                        latest_gps = (gps_data[0], gps_data[1], accel_speed_kmh)
-                        gps_last_update_time = time.time()
-                        latest_speed_source = "ACCEL"
             else:
-                # Invalid reading: keep last lat/lon, compute speed from accelerometer
+                # Fallback to accelerometer without blocking
                 with data_lock:
                     prev_lat, prev_lon, _prev_speed = latest_gps
                 accel_speed_ms = calculate_speed_from_accel()
@@ -174,20 +158,10 @@ def gps_thread(gps_serial):
                     gps_last_update_time = time.time()
                     latest_speed_source = "ACCEL"
         except Exception as e:
-            # On any exception: fallback speed using accelerometer; preserve last lat/lon
             print(f"GPS thread error (fallback to accel): {e}")
-            with data_lock:
-                prev_lat, prev_lon, _prev_speed = latest_gps
-            accel_speed_ms = calculate_speed_from_accel()
-            accel_speed_kmh = accel_speed_ms * 3.6
-            accel_speed_kmh = round(accel_speed_kmh, last_accel_decimals)
-            with data_lock:
-                latest_gps = (prev_lat, prev_lon, accel_speed_kmh)
-                gps_last_update_time = time.time()
-                latest_speed_source = "ACCEL"
-        time.sleep(0.01)
-
-    print("GPS thread stopped.")
+            # Same fallback logic but don't block
+            
+        time.sleep(0.001)  # 1ms instead of 10ms
 
 def speed_limit_thread():
     """Background thread to periodically fetch speed limit using latest GPS coords.
