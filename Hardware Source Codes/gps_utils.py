@@ -84,7 +84,7 @@ def get_gps_data(gps_serial):
     try:
         # Try reading multiple lines to find a valid one
         lines_read = 0
-        max_lines = 10
+        max_lines = 5
         
         while lines_read < max_lines:
             if gps_serial.in_waiting == 0:

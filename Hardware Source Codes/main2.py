@@ -10,7 +10,7 @@ import gps_utils  # type: ignore
 import speed_limit_utils  # type: ignore
 import firebase_uploader  # type: ignore
 
-TARGET_HZ = 1000
+TARGET_HZ = 100
 SAMPLE_INTERVAL = 1.0 / TARGET_HZ
 OLA_MAPS_API_KEY = "50c25aHLICdWQ4JbXp2MZwgmliGxvqJ8os1MOYe3"
 SPEED_LIMIT_REFRESH_S = 50.0 
@@ -126,7 +126,7 @@ def mpu_thread():
         if data and len(data) >= 1 and data[0] is not None:
             add_accel_to_buffer(data[0])  # Use acc_x for speed calculation
             
-        time.sleep(0.005)
+        time.sleep(0.001)
 
 def gps_thread(gps_serial):
     # Simplified: no consecutive error counting; always fallback to accel-derived speed on failure
@@ -185,7 +185,7 @@ def gps_thread(gps_serial):
                 latest_gps = (prev_lat, prev_lon, accel_speed_kmh)
                 gps_last_update_time = time.time()
                 latest_speed_source = "ACCEL"
-        time.sleep(0.01)
+        time.sleep(1.0)
 
     print("GPS thread stopped.")
 
