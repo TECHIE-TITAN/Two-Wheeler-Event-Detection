@@ -32,44 +32,32 @@ current_is_active = False  # Only remaining control flag
 latest_speed_source = "UNKNOWN"  # Track whether speed from GPS or ACCEL fallback
 last_accel_decimals = 3  # Track decimal precision of last acceleration reading
 
-# Speed calculation buffers and state
-# accel_buffer now holds ONLY the last 10 acceleration samples (m/s^2) for moving average
-accel_buffer = deque(maxlen=10)  # type: ignore
+# Speed calculation state
+last_accel_ms2 = 0.0  # Store latest acceleration in m/s^2
+last_speed_calc_time = None  # Store last time speed was calculated
 current_speed_ms = 0.0  # Current speed in m/s
 speed_calculation_lock = threading.Lock()
 gps_last_update_time = 0.0  # Track when GPS was last successfully updated
 GPS_TIMEOUT_SECONDS = 5.0  # Consider GPS stale after 5 seconds without update
 
-def add_accel_to_buffer(acc_x):
-    """Add acceleration sample (converted to m/s^2) keeping only last 10 samples.
-    Also track decimal precision of the raw acceleration input to mirror precision in speed outputs."""
-    global accel_buffer, last_accel_decimals
-    with speed_calculation_lock:
-        accel_ms2 = acc_x * 9.81 if acc_x is not None else 0.0
-        # Determine decimal places from raw acc_x (not scaled) if provided
-        if acc_x is not None:
-            raw_str = f"{acc_x:.10f}".rstrip('0').rstrip('.')
-            if '.' in raw_str:
-                decs = len(raw_str.split('.')[1])
-                if decs > 0:
-                    last_accel_decimals = min(decs, 10)
-        accel_buffer.append(accel_ms2)  # deque auto-discards oldest beyond maxlen
-
 def calculate_speed_from_accel():
-    """Update and return speed using moving average of last up to 10 accel samples.
-    Integrates only over the latest SAMPLE_INTERVAL to avoid repeated accumulation
-    over overlapping windows (which previously caused runaway increases)."""
-    global current_speed_ms, accel_buffer, last_accel_decimals
+    """Update and return speed using latest acceleration and time since last calculation.
+    Note: This function no longer updates last_speed_calc_time. The caller should update it.
+    """
+    global current_speed_ms, last_accel_ms2, last_speed_calc_time, last_accel_decimals
     with speed_calculation_lock:
-        if len(accel_buffer) == 0:
+        # If we don't have a previous timestamp, cannot integrate yet
+        if last_speed_calc_time is None:
             return current_speed_ms
-        avg_accel_ms2 = sum(accel_buffer) / len(accel_buffer)
-        if abs(avg_accel_ms2) < 0.2:
-            avg_accel_ms2 = 0.0
-        current_speed_ms += avg_accel_ms2 * SAMPLE_INTERVAL
+        now = time.time()
+        dt = max(0.0, now - last_speed_calc_time)
+        # Deadband to suppress noise
+        accel = last_accel_ms2
+        if abs(accel) < 0.2:
+            accel = 0.0
+        current_speed_ms += accel * dt
         if current_speed_ms < 0.0:
             current_speed_ms = 0.0
-        # Round internal stored speed to same decimals as acceleration (in m/s)
         current_speed_ms = round(current_speed_ms, last_accel_decimals)
         return current_speed_ms
 
@@ -79,7 +67,7 @@ def get_final_speed_kmh():
     1. GPS speed (if available and fresh)
     2. Accelerometer-based calculation (fallback)
     """
-    global latest_gps, current_speed_ms, gps_last_update_time
+    global latest_gps, current_speed_ms, gps_last_update_time, last_speed_calc_time
     
     current_time = time.time()
     
@@ -103,11 +91,17 @@ def get_final_speed_kmh():
         # Use GPS speed and sync our accelerometer-based speed to it
         with speed_calculation_lock:
             current_speed_ms = gps_speed_kmh / 3.6  # Convert km/h to m/s
+        # Refresh time anchor even when GPS is used
+        last_speed_calc_time = current_time
         return gps_speed_kmh, "GPS"
     else:
         # Use accelerometer-based speed calculation
         accel_speed_ms = calculate_speed_from_accel()
         accel_speed_kmh = accel_speed_ms * 3.6  # Convert m/s to km/h
+        
+        # Refresh time anchor on fallback path as well (calculate_speed_from_accel already updates,
+        # but we ensure consistency using the timestamp captured at function entry)
+        last_speed_calc_time = current_time
         
         # Indicate why accelerometer is being used
         if gps_is_stale and gps_data != (None, None, None):
@@ -116,16 +110,21 @@ def get_final_speed_kmh():
             return accel_speed_kmh, "ACCEL"
 
 def mpu_thread():
-    global latest_mpu
+    global latest_mpu, last_accel_ms2, last_accel_decimals
     while not stop_event.is_set():
         data = mpu_utils.get_mpu_data()
         with data_lock:
             latest_mpu = data
-        
-        # Add acceleration data to buffer for speed calculation
+        # Update latest acceleration and precision directly (no buffer)
         if data and len(data) >= 1 and data[0] is not None:
-            add_accel_to_buffer(data[0])  # Use acc_x for speed calculation
-            
+            with speed_calculation_lock:
+                acc_x = data[0]
+                last_accel_ms2 = acc_x * 9.81
+                raw_str = f"{acc_x:.10f}".rstrip('0').rstrip('.')
+                if '.' in raw_str:
+                    decs = len(raw_str.split('.')[1])
+                    if decs > 0:
+                        last_accel_decimals = min(decs, 10)
         time.sleep(0.001)
 
 def gps_thread(gps_serial):
@@ -157,6 +156,8 @@ def gps_thread(gps_serial):
                     else:
                         # Partial data (lat, lon only) -> compute fallback speed from acceleration
                         accel_speed_ms = calculate_speed_from_accel()
+                        # Caller updates time anchor after using fallback
+                        last_speed_calc_time = time.time()
                         accel_speed_kmh = accel_speed_ms * 3.6
                         accel_speed_kmh = round(accel_speed_kmh, last_accel_decimals)
                         latest_gps = (gps_data[0], gps_data[1], accel_speed_kmh)
@@ -167,6 +168,8 @@ def gps_thread(gps_serial):
                 with data_lock:
                     prev_lat, prev_lon, _prev_speed = latest_gps
                 accel_speed_ms = calculate_speed_from_accel()
+                # Caller updates time anchor after using fallback
+                last_speed_calc_time = time.time()
                 accel_speed_kmh = accel_speed_ms * 3.6
                 accel_speed_kmh = round(accel_speed_kmh, last_accel_decimals)
                 with data_lock:
@@ -179,6 +182,8 @@ def gps_thread(gps_serial):
             with data_lock:
                 prev_lat, prev_lon, _prev_speed = latest_gps
             accel_speed_ms = calculate_speed_from_accel()
+            # Caller updates time anchor after using fallback
+            last_speed_calc_time = time.time()
             accel_speed_kmh = accel_speed_ms * 3.6
             accel_speed_kmh = round(accel_speed_kmh, last_accel_decimals)
             with data_lock:
