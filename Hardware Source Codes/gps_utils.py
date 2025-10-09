@@ -6,6 +6,8 @@ parsing the $GPRMC NMEA sentence to extract latitude, longitude, and speed.
 
 import serial
 import time
+import subprocess
+import os
 
 # Configuration
 GPS_PORT = "/dev/serial0"
@@ -16,27 +18,44 @@ KNOTS_TO_KMH = 1.852
 DEBUG_GPS = True
 
 
-def init_gps(port=GPS_PORT, baud=GPS_BAUD):
-    """Initializes and opens the serial connection to the GPS module."""
+def enable_gps_port():
+    """Enable GPS port with proper permissions"""
     try:
-        gps_serial = serial.Serial(port, baud, timeout=1)
-        print(f"GPS serial port {port} opened successfully.")
-        
-        # Give GPS module time to initialize
-        time.sleep(2)
-        
-        # Clear any buffered data
-        gps_serial.flushInput()
-        
-        return gps_serial
-    except serial.SerialException as e:
-        print(f"Error: Could not open serial port {port}: {e}")
-        print("Possible solutions:")
-        print("1. Check if GPS module is properly connected")
-        print("2. Try alternative ports: /dev/ttyAMA0, /dev/ttyUSB0")
-        print("3. Check if serial is enabled: sudo raspi-config")
-        print("4. Check permissions: sudo usermod -a -G dialout $USER")
-        raise
+        subprocess.run(['sudo', 'chmod', '666', '/dev/ttyS0'], check=True)
+        if DEBUG_GPS:
+            print("✅ GPS port permissions enabled")
+        return True
+    except subprocess.CalledProcessError as e:
+        if DEBUG_GPS:
+            print(f"❌ Failed to enable GPS port: {e}")
+        return False
+
+
+def init_gps_with_recovery(port=GPS_PORT, baud=GPS_BAUD, max_retries=3):
+    """Initialize GPS with automatic port recovery"""
+    for attempt in range(max_retries):
+        try:
+            # Enable port permissions before attempting connection
+            if not enable_gps_port():
+                print(f"⚠️ Could not enable port permissions (attempt {attempt + 1}/{max_retries})")
+            
+            gps_serial = serial.Serial(port, baud, timeout=1)
+            if DEBUG_GPS:
+                print(f"✅ GPS serial connection established on {port}")
+            
+            # Give GPS module time to initialize
+            time.sleep(2)
+            gps_serial.flushInput()
+            return gps_serial
+            
+        except (serial.SerialException, OSError) as e:
+            print(f"⚠️ GPS connection attempt {attempt + 1}/{max_retries} failed: {e}")
+            if attempt < max_retries - 1:
+                print("🔄 Retrying in 2 seconds...")
+                time.sleep(2)
+    
+    print("❌ Failed to establish GPS connection after all retries")
+    return None
 
 
 def _parse_lat_lon(coord_str, direction):
@@ -72,81 +91,77 @@ def _parse_lat_lon(coord_str, direction):
         return None
 
 
-def get_gps_data(gps_serial):
-    """
-    Reads the GPS serial port, finds a valid $GPRMC sentence, and returns
-    parsed data.
-
-    Returns:
-        A tuple (latitude, longitude, speed_kmh) or (None, None, None) if
-        no valid data is found.
-    """
+def get_gps_data_with_recovery(gps_serial, retry_count=0, max_retries=3):
+    """Enhanced GPS data reading with automatic port recovery"""
     try:
-        # Try reading multiple lines to find a valid one
+        if gps_serial.in_waiting == 0:
+            return (None, None, None)
+        
         lines_read = 0
         max_lines = 5
         
-        while lines_read < max_lines:
-            if gps_serial.in_waiting == 0:
-                time.sleep(0.1)
-                lines_read += 1
-                continue
-                
+        while lines_read < max_lines and gps_serial.in_waiting > 0:
             line = gps_serial.readline().decode("ascii", errors="ignore").strip()
             lines_read += 1
             
-            # if DEBUG_GPS and line:
-            #     print(f"GPS Raw: {line}")
-
             if line.startswith("$GPRMC"):
                 parts = line.split(",")
-                
-                # if DEBUG_GPS:
-                #     print(f"GPRMC parts count: {len(parts)}")
-                #     if len(parts) > 2:
-                #         print(f"GPS Status: {parts[2]} (A=Active, V=Void)")
-                
-                # Check for basic validity: enough parts and 'A' status
                 if len(parts) >= 10:
-                    utc_time = parts[1]
                     status = parts[2]
                     lat_raw = parts[3]
                     lat_dir = parts[4]
                     lon_raw = parts[5]
                     lon_dir = parts[6]
                     speed_knots = parts[7]
-                    course = parts[8]
-                    date = parts[9]
                     
-                    # if DEBUG_GPS:
-                    #     print(f"GPS Data - Status: {status}, Lat: {lat_raw}{lat_dir}, Lon: {lon_raw}{lon_dir}, Speed: {speed_knots}kn")
-                    
-                    # Check if GPS has a valid fix
                     if status == 'A' and lat_raw and lon_raw and lat_dir and lon_dir:
-                        # Parse coordinates and speed
                         latitude = _parse_lat_lon(lat_raw, lat_dir)
                         longitude = _parse_lat_lon(lon_raw, lon_dir)
                         speed_kmh = float(speed_knots) * KNOTS_TO_KMH if speed_knots else 0.0
 
                         if latitude is not None and longitude is not None:
-                            # if DEBUG_GPS:
-                            #     print(f"GPS Parsed - Lat: {latitude:.6f}, Lon: {longitude:.6f}, Speed: {speed_kmh:.2f} km/h")
                             return (latitude, longitude, speed_kmh)
-                    elif status == 'V':
-                        if DEBUG_GPS:
-                            print("GPS Status: No valid fix (searching for satellites...)")
-                    else:
-                        if DEBUG_GPS:
-                            print(f"GPS Status: Invalid data - Status: {status}, Lat: {lat_raw}, Lon: {lon_raw}")
-
-        # If no valid $GPRMC sentence was found after trying
-        # if DEBUG_GPS:
-        #     print(f"No valid GPS data found after reading {lines_read} lines")
+        
         return (None, None, None)
 
-    except (serial.SerialException, ValueError, IndexError) as e:
-        print(f"Error reading or parsing GPS data: {e}")
+    except (serial.SerialException, OSError) as e:
+        if DEBUG_GPS:
+            print(f"⚠️ GPS serial error: {e}")
+        
+        if retry_count < max_retries:
+            print(f"🔄 Attempting GPS recovery (attempt {retry_count + 1}/{max_retries})")
+            
+            # Try to re-enable port and reconnect
+            if enable_gps_port():
+                try:
+                    gps_serial.close()
+                    time.sleep(1)
+                    gps_serial.open()
+                    print("✅ GPS port reconnected successfully")
+                    
+                    # Recursive call with incremented retry count
+                    return get_gps_data_with_recovery(gps_serial, retry_count + 1, max_retries)
+                    
+                except Exception as reconnect_error:
+                    if DEBUG_GPS:
+                        print(f"❌ GPS reconnection failed: {reconnect_error}")
+            
         return (None, None, None)
+    
+    except Exception as e:
+        if DEBUG_GPS:
+            print(f"GPS read error: {e}")
+        return (None, None, None)
+
+
+def init_gps(port=GPS_PORT, baud=GPS_BAUD):
+    """Legacy function - now uses recovery version"""
+    return init_gps_with_recovery(port, baud)
+
+
+def get_gps_data(gps_serial):
+    """Legacy function - now uses recovery version"""
+    return get_gps_data_with_recovery(gps_serial)
 
 
 def test_gps_connection(port=GPS_PORT, baud=GPS_BAUD, duration=30):
