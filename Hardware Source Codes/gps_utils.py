@@ -31,7 +31,7 @@ def enable_gps_port():
         return False
 
 
-def init_gps_with_recovery(port=GPS_PORT, baud=GPS_BAUD, max_retries=3):
+def init_gps_with_recovery(port=GPS_PORT, baud=GPS_BAUD, max_retries=10):
     """Initialize GPS with automatic port recovery"""
     for attempt in range(max_retries):
         try:
