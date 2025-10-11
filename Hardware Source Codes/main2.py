@@ -364,7 +364,7 @@ def main():
                     row = {
                         'timestamp': readable_timestamp,
                         'image_path': img_path or '',
-                        'acc_x': mpu[0]*9.81, 'acc_y': mpu[1]*9.81, 'acc_z': mpu[2]*9.81,
+                        'acc_x': mpu[0], 'acc_y': mpu[1], 'acc_z': mpu[2],
                         'gyro_x': mpu[3], 'gyro_y': mpu[4], 'gyro_z': mpu[5],
                         'latitude': lat, 'longitude': lon,
                         'speed': spd,
