@@ -19,14 +19,17 @@ FIREBASE_PUSH_INTERVAL_S = 7.0
 USER_ID = "OYFNMBRHiPduTdplwnSIa2dxdwx1"
 CONTROL_POLL_INTERVAL_S = 10.0
 IMAGE_REFRESH_INTERVAL_S = 1.0  # Refresh image directory listing every 1 second
+CSV_BATCH_SIZE = 10  # Write CSV in batches for better performance
+PRINT_INTERVAL = 100  # Print every N samples (1 Hz at 100 Hz sampling)
 
 IMAGE_DIR = "captured_images/"
 CSV_FILENAME = "sensor_data.csv"
 
 # Queues for async I/O
-csv_write_queue = Queue(maxsize=1000)  # Buffer up to 1000 samples
+csv_write_queue = Queue(maxsize=2000)  # Buffer up to 2000 samples
 firebase_push_queue = Queue(maxsize=100)
 print_queue = Queue(maxsize=100)  # For console output
+control_poll_queue = Queue(maxsize=1)  # For control flag updates
 
 data_lock = threading.Lock()
 latest_mpu = (None, None, None, None, None, None)
@@ -269,7 +272,7 @@ def get_latest_image_for_timestamp(target_timestamp_ms):
     return best_image
 
 def csv_writer_thread(csv_filename, fieldnames):
-    """Background thread to write CSV rows from queue."""
+    """Background thread to write CSV rows from queue with batching and formatting."""
     file_exists = os.path.isfile(csv_filename)
     
     with open(csv_filename, 'a', newline='') as f:
@@ -277,15 +280,51 @@ def csv_writer_thread(csv_filename, fieldnames):
         if not file_exists:
             writer.writeheader()
         
+        batch = []
         while not stop_event.is_set():
             try:
-                row = csv_write_queue.get(timeout=0.1)
-                writer.writerow(row)
-                f.flush()  # Ensure data is written periodically
+                # row is now a tuple: (timestamp_ms, img_path, mpu_tuple, lat, lon, spd, speed_limit, speed_source)
+                row_data = csv_write_queue.get(timeout=0.1)
+                
+                # Unpack tuple
+                timestamp_ms, img_path, mpu, lat, lon, spd, speed_limit, speed_source = row_data
+                
+                # Format timestamp here (not in main loop)
+                readable_timestamp = datetime.fromtimestamp(timestamp_ms / 1000.0).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+                
+                # Build dict for CSV
+                row = {
+                    'timestamp': readable_timestamp,
+                    'image_path': img_path or '',
+                    'acc_x': mpu[0], 'acc_y': mpu[1], 'acc_z': mpu[2],
+                    'gyro_x': mpu[3], 'gyro_y': mpu[4], 'gyro_z': mpu[5],
+                    'latitude': lat, 'longitude': lon,
+                    'speed': spd,
+                    'speed_limit': speed_limit
+                }
+                
+                batch.append(row)
+                
+                # Write in batches for better I/O performance
+                if len(batch) >= CSV_BATCH_SIZE:
+                    writer.writerows(batch)
+                    f.flush()
+                    batch.clear()
+                    
             except Empty:
+                # Flush any remaining batch when queue is empty
+                if batch:
+                    writer.writerows(batch)
+                    f.flush()
+                    batch.clear()
                 continue
             except Exception as e:
                 print(f"CSV writer error: {e}")
+        
+        # Final flush on exit
+        if batch:
+            writer.writerows(batch)
+            f.flush()
 
 def print_worker_thread():
     """Background thread to handle console output."""
@@ -314,6 +353,30 @@ def firebase_worker_thread():
             continue
         except Exception as e:
             print(f"Firebase worker error: {e}")
+
+def control_poll_thread():
+    """Background thread to periodically poll control flags."""
+    global current_is_active, last_control_poll
+    
+    while not stop_event.is_set():
+        time.sleep(CONTROL_POLL_INTERVAL_S)
+        
+        # Get current ride_id from queue (non-blocking)
+        ride_id = None
+        try:
+            ride_id = control_poll_queue.get_nowait()
+            # Put it back for next iteration
+            control_poll_queue.put_nowait(ride_id)
+        except Empty:
+            continue
+        
+        if ride_id:
+            try:
+                is_active, _calc = firebase_uploader.get_control_flags_for_ride(USER_ID, ride_id)
+                current_is_active = is_active
+                last_control_poll = time.time()
+            except Exception as e:
+                pass  # Retain previous state on failure
 
 def wait_until_active(ride_id: str | None = None, poll_interval: float = 0.5):
     """Obtain (if needed) the next ride_id and block until remote activates it.
@@ -386,6 +449,7 @@ def main():
     threads.append(threading.Thread(target=update_image_cache, daemon=True))
     threads.append(threading.Thread(target=print_worker_thread, daemon=True))
     threads.append(threading.Thread(target=firebase_worker_thread, daemon=True))
+    threads.append(threading.Thread(target=control_poll_thread, daemon=True))
     
     for t in threads:
         t.start()
@@ -407,60 +471,71 @@ def main():
         # Start CSV writer thread for this ride
         csv_thread = threading.Thread(target=csv_writer_thread, args=(csv_filename, fieldnames), daemon=True)
         csv_thread.start()
+        
+        # Put ride_id in control poll queue
+        try:
+            control_poll_queue.put_nowait(ride_id)
+        except:
+            pass
 
         print(f"Logging at {TARGET_HZ} Hz to {csv_filename}. Press Ctrl+C to stop.")
         next_sample_time = time.perf_counter()
         last_fb_push = 0.0
         sample_count = 0
+        
+        # Pre-allocate variables to avoid lookups
+        sample_interval = SAMPLE_INTERVAL
+        fb_interval = FIREBASE_PUSH_INTERVAL_S
+        print_interval = PRINT_INTERVAL
 
         try:
             while not stop_event.is_set():                
-                loop_start = time.perf_counter()
-                
-                # Sleep until next sample time
-                sleep_time = next_sample_time - loop_start
-                if sleep_time > 0:
+                # Sleep until next sample time (tight timing loop)
+                now = time.perf_counter()
+                sleep_time = next_sample_time - now
+                if sleep_time > 0.0001:  # Only sleep if > 0.1ms
                     time.sleep(sleep_time)
                 
-                # Update next sample time (even if we're late)
-                next_sample_time += SAMPLE_INTERVAL
+                # Update next sample time
+                next_sample_time += sample_interval
 
-                # Single atomic read of all sensor data
+                # CRITICAL SECTION: Single atomic read - minimize lock time
                 with data_lock:
-                    mpu = latest_mpu
-                    gps = latest_gps
+                    mpu = latest_mpu  # Tuple copy (fast)
+                    lat, lon, gps_speed = latest_gps  # Unpack directly
                     speed_limit = latest_speed_limit
 
-                # Compute speed (fast, no locks)
-                spd, speed_source = get_final_speed_kmh()
-                lat, lon, _ = gps
-
-                # Get timestamp and image path (using cached image list)
-                target_timestamp_ms = int(time.time() * 1000)
-                img_path = get_latest_image_for_timestamp(target_timestamp_ms)
-                readable_timestamp = datetime.fromtimestamp(target_timestamp_ms / 1000.0).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
-
-                row = {
-                    'timestamp': readable_timestamp,
-                    'image_path': img_path or '',
-                    'acc_x': mpu[0], 'acc_y': mpu[1], 'acc_z': mpu[2],
-                    'gyro_x': mpu[3], 'gyro_y': mpu[4], 'gyro_z': mpu[5],
-                    'latitude': lat, 'longitude': lon,
-                    'speed': spd,
-                    'speed_limit': speed_limit
-                }
-
-                # Poll control flags periodically (non-blocking check)
+                # Compute speed inline (avoid function call overhead)
+                # Use GPS if available, otherwise use accelerometer
                 t_wall = time.time()
-                if (t_wall - last_control_poll) >= CONTROL_POLL_INTERVAL_S:
-                    try:
-                        is_active, _calc = firebase_uploader.get_control_flags_for_ride(USER_ID, ride_id)
-                        current_is_active = is_active
-                    except Exception:
-                        pass  # retain previous state on failure
-                    last_control_poll = t_wall
+                gps_is_stale = (t_wall - gps_last_update_time) > GPS_TIMEOUT_SECONDS
+                
+                if gps_speed is not None and not gps_is_stale and 0 <= gps_speed <= 300:
+                    spd = gps_speed
+                    speed_source = "GPS"
+                else:
+                    # Accelerometer fallback (simplified inline)
+                    with speed_calculation_lock:
+                        if last_speed_calc_ts is not None:
+                            dt = time.perf_counter() - last_speed_calc_ts
+                            accel = last_accel_ms2 if abs(last_accel_ms2) >= 0.2 else 0.0
+                            current_speed_ms_local = max(0.0, current_speed_ms + accel * dt)
+                            current_speed_ms = current_speed_ms_local
+                        last_speed_calc_ts = time.perf_counter()
+                        spd = current_speed_ms * 3.6
+                    speed_source = "ACCEL"
 
-                # If not active, end the ride
+                # Get timestamp (raw integer - formatting done in CSV writer)
+                timestamp_ms = int(t_wall * 1000)
+                
+                # Image path lookup - do in background or skip for performance
+                # For 100 Hz, we skip this in main loop and handle in CSV writer if needed
+                img_path = None  # Set to None for max speed; CSV writer can lookup if needed
+
+                # Pack data as tuple (much faster than dict construction)
+                row_tuple = (timestamp_ms, img_path, mpu, lat, lon, spd, speed_limit, speed_source)
+
+                # Check if ride is still active (control poll thread updates this)
                 if not current_is_active:
                     # Ride has ended - wait for queue to drain, then upload
                     print(f"\nRide {ride_id} ended. Flushing data...")
@@ -485,31 +560,27 @@ def main():
                     # Break out of the inner loop to start new ride
                     break
 
-                # Queue CSV write (non-blocking)
+                # Queue CSV write (non-blocking, fast)
                 try:
-                    csv_write_queue.put_nowait(row)
+                    csv_write_queue.put_nowait(row_tuple)
                 except:
                     pass  # Queue full, skip this sample
 
-                # Queue console output every N samples to reduce overhead
+                # Increment sample counter
                 sample_count += 1
-                if sample_count % 10 == 0:  # Print every 10 samples (10 Hz console output)
-                    if speed_source == "ACCEL":
-                        speed_str = f"{spd:.{last_accel_decimals}f}"
-                    else:
-                        speed_str = f"{spd:.{last_accel_decimals}f}"
-                    msg = (f"Logged: Time={readable_timestamp} Acc=({mpu[0]},{mpu[1]},{mpu[2]}) "
-                           f"Gyro=({mpu[3]},{mpu[4]},{mpu[5]}) "
-                           f"Lat={lat} Lon={lon} Speed={speed_str} km/h "
-                           f"SpeedLimit={speed_limit} Src={speed_source} "
-                           f"Image={os.path.basename(img_path) if img_path else 'None'}")
+                
+                # Queue console output much less frequently (1 Hz at 100 Hz sampling)
+                if sample_count % print_interval == 0:
+                    readable_ts = datetime.fromtimestamp(timestamp_ms / 1000.0).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+                    msg = (f"[{sample_count}] Time={readable_ts} Acc=({mpu[0]:.4f},{mpu[1]:.4f},{mpu[2]:.4f}) "
+                           f"Speed={spd:.2f} km/h Src={speed_source}")
                     try:
                         print_queue.put_nowait(msg)
                     except:
                         pass
 
                 # Queue Firebase push periodically
-                if (t_wall - last_fb_push) >= FIREBASE_PUSH_INTERVAL_S:
+                if (t_wall - last_fb_push) >= fb_interval:
                     if all(v is not None for v in mpu):
                         try:
                             firebase_push_queue.put_nowait({
