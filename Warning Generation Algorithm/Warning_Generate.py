@@ -1,10 +1,15 @@
 import threading
 import time
+import os
+import re
 import numpy as np
+import h5py
 from dataclasses import dataclass
 from typing import List
 import tensorflow as tf
 from tensorflow import keras
+from keras.models import Sequential
+from keras.layers import LSTM, Dense, Dropout, Input
 
 # Global data structure
 @dataclass
@@ -30,12 +35,135 @@ data_lock = threading.Lock()
 warning_state = [0, 0, 0, 0, 0, 0, 0]
 warning_lock = threading.Lock()
 
-# LSTM model - load from same folder
+# LSTM model initialization
+lstm_model = None
+WEIGHTS_PATH = os.path.join(os.path.dirname(__file__), 'lstm_model_weights.weights.h5')
+
+def build_lstm_model(input_shape, n_classes, lstm_units=100, dense_intermediate=10):
+    """Build LSTM model architecture matching the weights file"""
+    model = Sequential()
+    model.add(Input(shape=input_shape))
+    model.add(LSTM(units=lstm_units))
+    model.add(Dropout(0.5))
+    model.add(Dense(units=dense_intermediate, activation='relu'))
+    model.add(Dense(n_classes, activation='softmax'))
+    model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
+    return model
+
+def infer_model_config_from_weights(weights_path):
+    """Infer LSTM units and output classes from HDF5 weights file"""
+    lstm_units = None
+    n_classes = None
+    dense_intermediate = None
+    dense_kernels = []
+    
+    try:
+        with h5py.File(weights_path, 'r') as f:
+            def visitor(name, obj):
+                nonlocal lstm_units
+                if isinstance(obj, h5py.Dataset):
+                    lname = name.lower()
+                    if 'kernel' in lname:
+                        shape = obj.shape
+                        if len(shape) == 2:
+                            # Detect LSTM kernel by expecting input_dim=7 and 4*units columns
+                            if 'lstm' in lname and shape[1] % 4 == 0:
+                                lstm_units = shape[1] // 4
+                            # Collect dense kernels for later analysis
+                            if 'dense' in lname:
+                                dense_kernels.append((name, shape))
+            
+            f.visititems(visitor)
+    except Exception as e:
+        print(f'Warning: could not inspect weights file: {e}')
+    
+    # Infer dense_intermediate and n_classes from dense kernels
+    if dense_kernels:
+        dense_kernels.sort(key=lambda x: x[0])
+        for _, (in_dim, out_dim) in dense_kernels:
+            if lstm_units is not None and in_dim == lstm_units:
+                dense_intermediate = out_dim
+                break
+        n_classes_candidates = [shape[1] for _, shape in dense_kernels]
+        if n_classes_candidates:
+            n_classes = min(n_classes_candidates)
+    
+    # Fallbacks
+    if lstm_units is None:
+        lstm_units = 100
+    if dense_intermediate is None:
+        dense_intermediate = 10
+    if n_classes is None:
+        n_classes = 5
+    
+    return int(lstm_units), int(n_classes), int(dense_intermediate)
+
+def load_lstm_model():
+    """Load LSTM model with weights, handling shape mismatches"""
+    global lstm_model
+    
+    if not os.path.exists(WEIGHTS_PATH):
+        print(f"Warning: Weights file not found at {WEIGHTS_PATH}")
+        return None
+    
+    try:
+        # Infer configuration from weights
+        lstm_units, n_classes, dense_intermediate = infer_model_config_from_weights(WEIGHTS_PATH)
+        print(f"Inferred model config: lstm_units={lstm_units}, n_classes={n_classes}, dense_intermediate={dense_intermediate}")
+        
+        # Build model with correct architecture
+        model = build_lstm_model(
+            input_shape=(BATCH_SIZE, 7),
+            n_classes=n_classes,
+            lstm_units=lstm_units,
+            dense_intermediate=dense_intermediate
+        )
+        
+        # Load weights
+        try:
+            model.load_weights(WEIGHTS_PATH)
+            print("LSTM model weights loaded successfully")
+            return model
+        except Exception as e:
+            # Try to infer units from error message
+            msg = str(e)
+            print(f'Initial load_weights failed: {msg}')
+            matches = re.findall(r"value\.shape=\((\d+)\s*,\s*(\d+)\)", msg)
+            inferred_units = None
+            
+            for a_str, b_str in matches:
+                try:
+                    a = int(a_str)
+                    b = int(b_str)
+                    if b % 4 == 0 and a == 7:  # Expect input_dim=7 features
+                        inferred_units = b // 4
+                        break
+                except Exception:
+                    pass
+            
+            if inferred_units is not None and inferred_units != lstm_units:
+                print(f'Rebuilding with lstm_units={inferred_units} based on error parsing...')
+                model = build_lstm_model(
+                    input_shape=(BATCH_SIZE, 7),
+                    n_classes=n_classes,
+                    lstm_units=inferred_units,
+                    dense_intermediate=dense_intermediate
+                )
+                model.load_weights(WEIGHTS_PATH)
+                print("LSTM model loaded with corrected units")
+                return model
+            else:
+                raise
+    
+    except Exception as e:
+        print(f"Error loading LSTM model: {e}")
+        return None
+
+# Load model on startup
 try:
-    lstm_model = keras.models.load_model('lstm_model.h5')
-    print("LSTM model loaded successfully")
+    lstm_model = load_lstm_model()
 except Exception as e:
-    print(f"Error loading LSTM model: {e}")
+    print(f"Failed to load LSTM model: {e}")
     lstm_model = None
 
 # Configuration parameters
@@ -83,6 +211,11 @@ def lstm_prediction_thread():
     """Thread for LSTM model predictions using 104 data points"""
     global lstm_model
     
+    # Class names from model (alphabetical order from get_dummies)
+    # ['BUMP', 'LEFT', 'RIGHT', 'STOP', 'STRAIGHT']
+    CLASS_NAMES = ['BUMP', 'LEFT', 'RIGHT', 'STOP', 'STRAIGHT']
+    BUMP_CONFIDENCE_THRESHOLD = 0.6  # Minimum confidence to trigger bump warning
+    
     while True:
         try:
             batch = get_current_data_batch()
@@ -90,9 +223,14 @@ def lstm_prediction_thread():
                 time.sleep(0.1)
                 continue
             
+            if lstm_model is None:
+                time.sleep(0.1)
+                continue
+            
             features = extract_batch_features(batch)
             
             # Prepare input for LSTM (104 timesteps, 7 features)
+            # Match the exact order used in training: acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z, speed
             input_sequence = np.stack([
                 features['accel_x'],
                 features['accel_y'],
@@ -104,22 +242,38 @@ def lstm_prediction_thread():
             ], axis=1)
             
             # Reshape to (1, 104, 7) for batch prediction
-            input_sequence = input_sequence.reshape(1, BATCH_SIZE, 7)
+            input_sequence = input_sequence.reshape(1, BATCH_SIZE, 7).astype(np.float32)
             
-            if lstm_model is not None:
-                # Predict: left, right, straight, stop, bump
-                prediction = lstm_model.predict(input_sequence, verbose=0)
-                
-                # Check for bump detection (adjust index based on your model output)
-                if prediction[0][-1] > 0.5:  # Assuming last output is bump
-                    update_warning(1, 1)  # Update bump warning
-                else:
-                    update_warning(1, 0)
+            # Check for NaNs in input
+            if np.isnan(input_sequence).any():
+                print("Warning: NaN values detected in LSTM input, skipping prediction")
+                time.sleep(0.1)
+                continue
+            
+            # Predict: [BUMP, LEFT, RIGHT, STOP, STRAIGHT]
+            prediction = lstm_model.predict(input_sequence, verbose=0)
+            pred_class_idx = np.argmax(prediction[0])
+            confidence = prediction[0][pred_class_idx]
+            predicted_label = CLASS_NAMES[pred_class_idx] if pred_class_idx < len(CLASS_NAMES) else str(pred_class_idx)
+            
+            # BUMP is typically index 0 in alphabetical order
+            bump_idx = CLASS_NAMES.index('BUMP') if 'BUMP' in CLASS_NAMES else 0
+            
+            # Update bump warning based on prediction and confidence
+            if pred_class_idx == bump_idx and confidence >= BUMP_CONFIDENCE_THRESHOLD:
+                update_warning(1, 1)  # Bump detected
+            else:
+                update_warning(1, 0)  # No bump
+            
+            # Optional: Log predictions for debugging
+            # print(f"LSTM prediction: {predicted_label} (confidence: {confidence:.3f})")
             
             time.sleep(0.05)
             
         except Exception as e:
             print(f"LSTM thread error: {e}")
+            import traceback
+            traceback.print_exc()
             time.sleep(0.1)
 
 
