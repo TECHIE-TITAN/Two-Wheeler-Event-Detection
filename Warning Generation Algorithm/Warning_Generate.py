@@ -2,6 +2,7 @@ import threading
 import time
 import os
 import re
+import sys
 import numpy as np
 import h5py
 from dataclasses import dataclass
@@ -10,6 +11,10 @@ import tensorflow as tf
 from tensorflow import keras
 from keras.models import Sequential
 from keras.layers import LSTM, Dense, Dropout, Input
+
+# Add Hardware Source Codes to path for shared_memory_bridge import
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'Hardware Source Codes'))
+import shared_memory_bridge  # type: ignore
 
 # Global data structure
 @dataclass
@@ -31,9 +36,17 @@ BATCH_SIZE = 104
 current_data_batch: List[SensorData] = []
 data_lock = threading.Lock()
 
-# Warning tuple: [overspeeding, bump, pothole, car_distance, speedy_turns, harsh_braking, sudden_accel]
-warning_state = [0, 0, 0, 0, 0, 0, 0]
+# Shared memory reader for receiving data from main2.py
+shm_reader = None
+shm_read_thread_active = False
+
+# Warning tuple: [overspeeding, bump, pothole, speedy_turns, harsh_braking, sudden_accel]
+warning_state = [0, 0, 0, 0, 0, 0]
 warning_lock = threading.Lock()
+
+# LSTM model output tracking
+lstm_last_prediction = "UNKNOWN"  # Last predicted class: BUMP, LEFT, RIGHT, STOP, STRAIGHT
+lstm_prediction_lock = threading.Lock()
 
 # LSTM model initialization
 lstm_model = None
@@ -167,11 +180,9 @@ except Exception as e:
     lstm_model = None
 
 # Configuration parameters
-SPEEDY_TURN_THRESHOLD = 0.5  # rad/s
+SPEEDY_TURN_THRESHOLD = 0.5  # rad/s (Z-axis angular velocity for yaw/turning)
 HARSH_BRAKE_THRESHOLD = -4.0  # m/s^2
 SUDDEN_ACCEL_THRESHOLD = 3.5  # m/s^2
-CAR_DISTANCE_THRESHOLD = 2.0  # meters
-SPEED_BUFFER = 5.0  # km/h buffer for overspeeding
 POTHOLE_Z_THRESHOLD = 2.5  # m/s^2 vertical acceleration spike
 
 
@@ -179,6 +190,17 @@ def update_warning(index: int, value: int):
     """Thread-safe warning update"""
     with warning_lock:
         warning_state[index] = value
+
+def update_lstm_prediction(prediction: str):
+    """Thread-safe LSTM prediction update"""
+    global lstm_last_prediction
+    with lstm_prediction_lock:
+        lstm_last_prediction = prediction
+
+def get_lstm_prediction() -> str:
+    """Get last LSTM prediction"""
+    with lstm_prediction_lock:
+        return lstm_last_prediction
 
 
 def get_current_data_batch() -> List[SensorData]:
@@ -208,11 +230,14 @@ def extract_batch_features(batch: List[SensorData]) -> dict:
 
 
 def lstm_prediction_thread():
-    """Thread for LSTM model predictions using 104 data points"""
+    """Thread for LSTM model predictions using 104 data points
+    
+    Model outputs 5 classes in alphabetical order: [BUMP, LEFT, RIGHT, STOP, STRAIGHT]
+    Returns a single prediction per batch of 104 points.
+    """
     global lstm_model
     
     # Class names from model (alphabetical order from get_dummies)
-    # ['BUMP', 'LEFT', 'RIGHT', 'STOP', 'STRAIGHT']
     CLASS_NAMES = ['BUMP', 'LEFT', 'RIGHT', 'STOP', 'STRAIGHT']
     BUMP_CONFIDENCE_THRESHOLD = 0.6  # Minimum confidence to trigger bump warning
     
@@ -256,7 +281,10 @@ def lstm_prediction_thread():
             confidence = prediction[0][pred_class_idx]
             predicted_label = CLASS_NAMES[pred_class_idx] if pred_class_idx < len(CLASS_NAMES) else str(pred_class_idx)
             
-            # BUMP is typically index 0 in alphabetical order
+            # Update global LSTM prediction for output
+            update_lstm_prediction(predicted_label)
+            
+            # BUMP is index 0 in alphabetical order
             bump_idx = CLASS_NAMES.index('BUMP') if 'BUMP' in CLASS_NAMES else 0
             
             # Update bump warning based on prediction and confidence
@@ -265,8 +293,7 @@ def lstm_prediction_thread():
             else:
                 update_warning(1, 0)  # No bump
             
-            # Optional: Log predictions for debugging
-            # print(f"LSTM prediction: {predicted_label} (confidence: {confidence:.3f})")
+            # Note: Debug print removed - prediction is displayed in main loop
             
             time.sleep(0.05)
             
@@ -278,7 +305,11 @@ def lstm_prediction_thread():
 
 
 def overspeeding_thread():
-    """Thread for overspeeding detection using batch data"""
+    """Thread for overspeeding detection using batch data
+    
+    Checks if current speed exceeds the posted speed limit directly.
+    No buffer is used - any speed over the limit is considered overspeeding.
+    """
     while True:
         try:
             batch = get_current_data_batch()
@@ -288,8 +319,8 @@ def overspeeding_thread():
             
             features = extract_batch_features(batch)
             
-            # Check if any point in batch exceeds speed limit
-            overspeeding = np.any(features['speed'] > features['speed_limit'] + SPEED_BUFFER)
+            # Check if any point in batch exceeds speed limit (no buffer)
+            overspeeding = np.any(features['speed'] > features['speed_limit'])
             
             if overspeeding:
                 update_warning(0, 1)
@@ -304,7 +335,16 @@ def overspeeding_thread():
 
 
 def speedy_turns_thread():
-    """Thread for detecting speedy/sharp turns using batch data"""
+    """Thread for detecting speedy/sharp turns using batch data
+    
+    For a scooter/two-wheeler:
+    - Z-axis (vertical) represents yaw rotation (turning left/right)
+    - X-axis represents pitch (front-back tilt)
+    - Y-axis represents roll (side-to-side tilt)
+    
+    We only monitor Z-axis angular velocity for turn detection.
+    ONLY checks if turn is speedy when LSTM predicts LEFT or RIGHT event.
+    """
     while True:
         try:
             batch = get_current_data_batch()
@@ -312,24 +352,29 @@ def speedy_turns_thread():
                 time.sleep(0.1)
                 continue
             
+            # Get latest LSTM prediction
+            latest_prediction = get_lstm_prediction()
+            
+            # Only check for speedy turns if LSTM detected a LEFT or RIGHT turn
+            if latest_prediction not in ['LEFT', 'RIGHT']:
+                update_warning(3, 0)  # No turn event, so no speedy turn warning
+                time.sleep(0.05)
+                continue
+            
             features = extract_batch_features(batch)
             
-            # Calculate angular velocity magnitude for each point
-            angular_vel = np.sqrt(
-                features['angular_x']**2 + 
-                features['angular_y']**2 + 
-                features['angular_z']**2
-            )
+            # Use only Z-axis angular velocity (yaw) for turn detection
+            angular_vel_z = np.abs(features['angular_z'])
             
-            # Check if any turn exceeds threshold while at speed
+            # Check if any turn exceeds threshold while at speed (>20 km/h)
             speedy_turn = np.any(
-                (angular_vel > SPEEDY_TURN_THRESHOLD) & (features['speed'] > 20)
+                (angular_vel_z > SPEEDY_TURN_THRESHOLD) & (features['speed'] > 20)
             )
             
             if speedy_turn:
-                update_warning(4, 1)
+                update_warning(3, 1)  # Speedy turn detected during LEFT/RIGHT event
             else:
-                update_warning(4, 0)
+                update_warning(3, 0)  # Turn detected but not speedy
             
             time.sleep(0.05)
             
@@ -367,26 +412,6 @@ def pothole_detection_thread():
             time.sleep(0.1)
 
 
-def car_distance_thread():
-    """Thread for car distance monitoring (requires external sensor/camera data)"""
-    while True:
-        try:
-            # Placeholder: In real implementation, get distance from radar/camera
-            # This should be integrated with your actual distance sensor
-            car_distance = get_simulated_car_distance()
-            
-            if car_distance < CAR_DISTANCE_THRESHOLD:
-                update_warning(3, 1)
-            else:
-                update_warning(3, 0)
-            
-            time.sleep(0.1)
-            
-        except Exception as e:
-            print(f"Car distance thread error: {e}")
-            time.sleep(0.1)
-
-
 def harsh_braking_thread():
     """Thread for harsh braking detection using slope of 104 data points"""
     while True:
@@ -417,9 +442,9 @@ def harsh_braking_thread():
                     min_jerk = np.min(jerk_values)
                     
                     if min_jerk < HARSH_BRAKE_THRESHOLD or avg_jerk < HARSH_BRAKE_THRESHOLD / 2:
-                        update_warning(5, 1)
+                        update_warning(4, 1)  # Updated index after removing car_distance
                     else:
-                        update_warning(5, 0)
+                        update_warning(4, 0)
             
             time.sleep(0.05)
             
@@ -460,9 +485,9 @@ def sudden_acceleration_thread():
                         max_instant_slope = np.max(instant_slopes)
                         
                         if slope > SUDDEN_ACCEL_THRESHOLD or max_instant_slope > SUDDEN_ACCEL_THRESHOLD * 2:
-                            update_warning(6, 1)
+                            update_warning(5, 1)  # Updated index after removing car_distance
                         else:
-                            update_warning(6, 0)
+                            update_warning(5, 0)
             
             time.sleep(0.05)
             
@@ -471,17 +496,81 @@ def sudden_acceleration_thread():
             time.sleep(0.1)
 
 
-def get_simulated_car_distance() -> float:
-    """Placeholder for car distance sensor data"""
-    # Replace with actual sensor reading
-    return 5.0
-
-
 def update_sensor_data_batch(new_batch: List[SensorData]):
     """Update global sensor data batch (called by data acquisition system)"""
     global current_data_batch
     with data_lock:
         current_data_batch = new_batch[-BATCH_SIZE:]  # Keep only last 104 points
+
+
+def shared_memory_reader_thread():
+    """Thread to continuously read batches from shared memory and update current_data_batch"""
+    global shm_reader, shm_read_thread_active, current_data_batch
+    
+    print("⏳ Shared memory reader thread starting...")
+    
+    # Wait for and initialize reader
+    try:
+        shm_reader = shared_memory_bridge.SensorDataReader(wait_for_creation=True, timeout=30.0)
+        print("✓ Shared memory reader connected to main2.py")
+    except Exception as e:
+        print(f"✗ Failed to connect to shared memory: {e}")
+        print("  Make sure main2.py is running first!")
+        shm_read_thread_active = False
+        return
+    
+    shm_read_thread_active = True
+    last_read_time = time.time()
+    read_count = 0
+    
+    while shm_read_thread_active:
+        try:
+            # Read batch from shared memory
+            batch_dict = shm_reader.read_batch_as_dict()
+            
+            if batch_dict is not None:
+                # Convert to SensorData objects
+                new_batch = []
+                for i in range(BATCH_SIZE):
+                    sensor_point = SensorData(
+                        timestamp=float(batch_dict['timestamps'][i]),
+                        accel_x=float(batch_dict['accel_x'][i]),
+                        accel_y=float(batch_dict['accel_y'][i]),
+                        accel_z=float(batch_dict['accel_z'][i]),
+                        angular_x=float(batch_dict['angular_x'][i]),
+                        angular_y=float(batch_dict['angular_y'][i]),
+                        angular_z=float(batch_dict['angular_z'][i]),
+                        latitude=float(batch_dict['latitude'][i]),
+                        longitude=float(batch_dict['longitude'][i]),
+                        speed=float(batch_dict['speed'][i]),
+                        speed_limit=float(batch_dict['speed_limit'][i])
+                    )
+                    new_batch.append(sensor_point)
+                
+                # Update global batch
+                with data_lock:
+                    current_data_batch = new_batch
+                
+                read_count += 1
+                
+                # Print stats every 10 batches
+                if read_count % 10 == 0:
+                    elapsed = time.time() - last_read_time
+                    rate = 10 / elapsed if elapsed > 0 else 0
+                    print(f"📊 Received {read_count} batches (rate: {rate:.1f} batches/s)")
+                    last_read_time = time.time()
+            
+            # Small sleep to avoid spinning (shared memory is always available)
+            time.sleep(0.01)  # 100 Hz polling rate
+            
+        except Exception as e:
+            print(f"✗ Shared memory read error: {e}")
+            time.sleep(0.1)
+    
+    # Cleanup
+    if shm_reader:
+        shm_reader.cleanup()
+    print("✓ Shared memory reader thread stopped")
 
 
 def get_warnings() -> list:
@@ -493,11 +582,11 @@ def get_warnings() -> list:
 def start_warning_system():
     """Initialize and start all monitoring threads"""
     threads = [
+        threading.Thread(target=shared_memory_reader_thread, daemon=True, name="SharedMemReader"),
         threading.Thread(target=lstm_prediction_thread, daemon=True, name="LSTM"),
         threading.Thread(target=overspeeding_thread, daemon=True, name="Overspeeding"),
-        threading.Thread(target=speedy_turns_thread, daemon=True, name="SpeedyTurns"),
         threading.Thread(target=pothole_detection_thread, daemon=True, name="Pothole"),
-        threading.Thread(target=car_distance_thread, daemon=True, name="CarDistance"),
+        threading.Thread(target=speedy_turns_thread, daemon=True, name="SpeedyTurns"),
         threading.Thread(target=harsh_braking_thread, daemon=True, name="HarshBraking"),
         threading.Thread(target=sudden_acceleration_thread, daemon=True, name="SuddenAccel")
     ]
@@ -513,52 +602,59 @@ def start_warning_system():
 
 # Example usage
 def main():
-    # Start all monitoring threads
+    """
+    Main function - now receives data from main2.py via shared memory
+    No need to simulate data anymore!
+    """
+    global shm_read_thread_active
+    
+    print("="*60)
+    print("  Two-Wheeler Event Detection - Warning Generation System")
+    print("  Receiving real-time data from main2.py via shared memory")
+    print("="*60)
+    
+    # Start all monitoring threads (includes shared memory reader)
     threads = start_warning_system()
     
-    # Simulate data updates (replace with actual sensor data acquisition)
+    # Monitor warnings
     try:
         batch_counter = 0
         while True:
-            # Simulate a batch of 104 sensor data points
-            sample_batch = []
-            base_time = time.time()
+            # Wait for data to be available
+            if len(get_current_data_batch()) < BATCH_SIZE:
+                print("⏳ Waiting for first batch from main2.py...")
+                time.sleep(1.0)
+                continue
             
-            for i in range(BATCH_SIZE):
-                sample_data = SensorData(
-                    timestamp=base_time + (i * 0.01),  # 10ms intervals
-                    accel_x=0.5 + np.random.normal(0, 0.1),
-                    accel_y=0.2 + np.random.normal(0, 0.1),
-                    accel_z=9.8 + np.random.normal(0, 0.2),
-                    angular_x=0.1 + np.random.normal(0, 0.05),
-                    angular_y=0.05 + np.random.normal(0, 0.05),
-                    angular_z=0.3 + np.random.normal(0, 0.05),
-                    latitude=17.385 + (i * 0.00001),
-                    longitude=78.486 + (i * 0.00001),
-                    speed=60.0 + np.random.normal(0, 2),
-                    speed_limit=50.0
-                )
-                sample_batch.append(sample_data)
-            
-            # Update the batch
-            update_sensor_data_batch(sample_batch)
             batch_counter += 1
             
             warnings = get_warnings()
+            lstm_pred = get_lstm_prediction()
             warning_names = [
-                "Overspeeding", "Bump", "Pothole", "Car Distance",
+                "Overspeeding", "Bump", "Pothole",
                 "Speedy Turns", "Harsh Braking", "Sudden Accel"
             ]
             
             active_warnings = [warning_names[i] for i, w in enumerate(warnings) if w == 1]
+            print(f"\nBatch {batch_counter}:")
+            print(f"  LSTM Prediction: {lstm_pred}")
             if active_warnings:
-                print(f"Batch {batch_counter} - Active warnings: {', '.join(active_warnings)}")
+                print(f"  ⚠ Active warnings: {', '.join(active_warnings)}")
             else:
-                print(f"Batch {batch_counter} - No warnings")
+                print(f"  ✓ No warnings")
             
-            time.sleep(1.04)  # Wait for next batch (104 points * 10ms)
+            time.sleep(1.0)  # Display update rate (1 Hz)
             
     except KeyboardInterrupt:
-        print("\nShutting down warning system...")
+        print("\n\nShutting down warning system...")
+        shm_read_thread_active = False
+        
+        # Wait for threads to finish
+        for thread in threads:
+            thread.join(timeout=1.0)
+        
+        print("✓ Warning system stopped")
 
-main()
+
+if __name__ == "__main__":
+    main()

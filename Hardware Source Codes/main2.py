@@ -3,6 +3,7 @@ import csv
 import os
 import threading
 import glob
+import numpy as np
 from collections import deque
 from datetime import datetime
 from queue import Queue, Empty
@@ -10,6 +11,7 @@ import mpu_utils  # type: ignore
 import gps_utils  # type: ignore
 import speed_limit_utils  # type: ignore
 import firebase_uploader  # type: ignore
+import shared_memory_bridge  # type: ignore
 
 TARGET_HZ = 104
 SAMPLE_INTERVAL = 1.0 / TARGET_HZ
@@ -55,72 +57,35 @@ speed_calculation_lock = threading.Lock()
 gps_last_update_time = 0.0  # Track when GPS was last successfully updated
 GPS_TIMEOUT_SECONDS = 5.0  # Consider GPS stale after 5 seconds without update
 
+# Shared memory for warning system communication
+shm_writer = None
+batch_buffer = []  # Accumulate 104 points before writing to shared memory
+batch_buffer_lock = threading.Lock()
+
 def calculate_speed_from_accel():
     """Update and return speed using latest acceleration and time since last calculation.
-    Note: This function no longer updates last_speed_calc_ts. The caller should update it.
+    Updates last_speed_calc_ts internally. Returns speed in m/s.
     """
     global current_speed_ms, last_accel_ms2, last_speed_calc_ts, last_accel_decimals
     with speed_calculation_lock:
-        # If we don't have a previous timestamp, cannot integrate yet
-        if last_speed_calc_ts is None:
-            return current_speed_ms
         now = time.perf_counter()
+        # If we don't have a previous timestamp, initialize it
+        if last_speed_calc_ts is None:
+            last_speed_calc_ts = now
+            return current_speed_ms
+        
         dt = max(0.0, now - last_speed_calc_ts)
+        last_speed_calc_ts = now  # Update anchor
+        
         # Deadband to suppress noise
-        accel = last_accel_ms2
-        if abs(accel) < 0.2:
-            accel = 0.0
+        accel = last_accel_ms2 if abs(last_accel_ms2) >= 0.2 else 0.0
+        
+        # Integrate acceleration
         current_speed_ms += accel * dt
         if current_speed_ms < 0.0:
             current_speed_ms = 0.0
-        current_speed_ms = round(current_speed_ms, last_accel_decimals)
+        # current_speed_ms = round(current_speed_ms, last_accel_decimals)
         return current_speed_ms
-
-def get_final_speed_kmh():
-    """
-    Get final speed in km/h using priority system:
-    1. GPS speed (if available and fresh)
-    2. Accelerometer-based calculation (fallback)
-    """
-    global latest_gps, current_speed_ms, gps_last_update_time, last_speed_calc_ts, latest_speed_source
-
-    current_time_wall = time.time()
-    current_time_perf = time.perf_counter()
-
-    with data_lock:
-        gps_data = latest_gps
-        last_gps_update = gps_last_update_time
-
-    # Check if GPS data is stale
-    gps_is_stale = (current_time_wall - last_gps_update) > GPS_TIMEOUT_SECONDS
-
-    # Extract GPS speed (assuming it's in km/h)
-    gps_speed_kmh = None
-    if gps_data and len(gps_data) >= 3 and gps_data[2] is not None and not gps_is_stale:
-        gps_speed_kmh = gps_data[2]
-        # Validate GPS speed (reasonable range)
-        if gps_speed_kmh < 0 or gps_speed_kmh > 300:
-            gps_speed_kmh = None
-
-    if gps_speed_kmh is not None:
-        # Use GPS speed and sync our accelerometer-based speed to it
-        with speed_calculation_lock:
-            current_speed_ms = gps_speed_kmh / 3.6
-            last_speed_calc_ts = current_time_perf  # refresh anchor even with GPS
-        latest_speed_source = "GPS"
-        return gps_speed_kmh, "GPS"
-    else:
-        # Use accelerometer-based speed calculation
-        accel_speed_ms = calculate_speed_from_accel()
-        accel_speed_kmh = accel_speed_ms * 3.6
-        # Refresh time anchor after using fallback based on perf counter
-        with speed_calculation_lock:
-            last_speed_calc_ts = current_time_perf
-        latest_speed_source = "ACCEL (GPS_STALE)" if gps_is_stale and gps_data != (None, None, None) else "ACCEL"
-        if gps_is_stale and gps_data != (None, None, None):
-            return accel_speed_kmh, "ACCEL (GPS_STALE)"
-        else:
-            return accel_speed_kmh, "ACCEL"
 
 def mpu_thread():
     global latest_mpu, last_accel_ms2, last_accel_decimals
@@ -141,71 +106,55 @@ def mpu_thread():
         time.sleep(0.001)
 
 def gps_thread(gps_serial):
-    # Simplified: no consecutive error counting; always fallback to accel-derived speed on failure
-    global latest_gps, gps_last_update_time, latest_speed_source, last_accel_decimals
-    last_valid_gps_time = 0
-    gps_read_count = 0
-    valid_gps_count = 0
-
+    """GPS thread - reads GPS data and handles speed fallback before updating global variable."""
+    global latest_gps, gps_last_update_time, latest_speed_source
+    
     print("GPS thread started...")
 
     while not stop_event.is_set():
         try:
             gps_data = gps_utils.get_gps_data(gps_serial)
-            gps_read_count += 1
-
+            
             if gps_data and gps_data != (None, None, None):
-                valid_gps_count += 1
-                last_valid_gps_time = time.time()
+                lat, lon, gps_speed = gps_data
+                
+                # Check if GPS speed is valid
+                if gps_speed is not None and 0 <= gps_speed <= 300:
+                    # Valid GPS speed - use it directly
+                    final_speed = gps_speed
+                    speed_src = "GPS"
+                else:
+                    # GPS speed unavailable or invalid - use accelerometer fallback
+                    accel_speed_ms = calculate_speed_from_accel()
+                    final_speed = accel_speed_ms * 3.6  # Convert m/s to km/h
+                    speed_src = "ACCEL"
+                
+                # Update global with final speed (either GPS or fallback)
                 with data_lock:
-                    if len(gps_data) == 3:
-                        # Round GPS speed to match acceleration decimals if present
-                        spd_val = gps_data[2]
-                        if spd_val is not None:
-                            spd_val = round(spd_val, last_accel_decimals)
-                        latest_gps = (gps_data[0], gps_data[1], spd_val)
-                        gps_last_update_time = time.time()
-                        latest_speed_source = "GPS"
-                    else:
-                        # Partial data (lat, lon only) -> compute fallback speed from acceleration
-                        accel_speed_ms = calculate_speed_from_accel()
-                        # Caller updates time anchor after using fallback
-                        with speed_calculation_lock:
-                            last_speed_calc_ts = time.perf_counter()
-                        accel_speed_kmh = accel_speed_ms * 3.6
-                        accel_speed_kmh = round(accel_speed_kmh, last_accel_decimals)
-                        latest_gps = (gps_data[0], gps_data[1], accel_speed_kmh)
-                        gps_last_update_time = time.time()
-                        latest_speed_source = "ACCEL"
+                    latest_gps = (lat, lon, final_speed)
+                    gps_last_update_time = time.time()
+                    latest_speed_source = speed_src
             else:
-                # Invalid reading: keep last lat/lon, compute speed from accelerometer
-                with data_lock:
-                    prev_lat, prev_lon, _prev_speed = latest_gps
+                # GPS read failed completely - use fallback speed with (None, None, speed)
                 accel_speed_ms = calculate_speed_from_accel()
-                # Caller updates time anchor after using fallback
-                with speed_calculation_lock:
-                    last_speed_calc_ts = time.perf_counter()
-                accel_speed_kmh = accel_speed_ms * 3.6
-                accel_speed_kmh = round(accel_speed_kmh, last_accel_decimals)
+                final_speed = accel_speed_ms * 3.6  # Convert m/s to km/h
+                
                 with data_lock:
-                    latest_gps = (prev_lat, prev_lon, accel_speed_kmh)
+                    latest_gps = (None, None, final_speed)
                     gps_last_update_time = time.time()
                     latest_speed_source = "ACCEL"
+                    
         except Exception as e:
-            # On any exception: fallback speed using accelerometer; preserve last lat/lon
-            print(f"GPS thread error (fallback to accel): {e}")
-            with data_lock:
-                prev_lat, prev_lon, _prev_speed = latest_gps
+            print(f"GPS thread error: {e}")
+            # On exception - use fallback speed with (None, None, speed)
             accel_speed_ms = calculate_speed_from_accel()
-            # Caller updates time anchor after using fallback
-            with speed_calculation_lock:
-                last_speed_calc_ts = time.perf_counter()
-            accel_speed_kmh = accel_speed_ms * 3.6
-            accel_speed_kmh = round(accel_speed_kmh, last_accel_decimals)
+            final_speed = accel_speed_ms * 3.6
+            
             with data_lock:
-                latest_gps = (prev_lat, prev_lon, accel_speed_kmh)
+                latest_gps = (None, None, final_speed)
                 gps_last_update_time = time.time()
                 latest_speed_source = "ACCEL"
+        
         time.sleep(1.0)
 
     print("GPS thread stopped.")
@@ -411,7 +360,16 @@ def wait_until_active(ride_id: str | None = None, poll_interval: float = 0.5):
     return ride_id
 
 def main():
-    global latest_speed_limit, last_speed_limit_fetch, current_is_active, last_control_poll
+    global latest_speed_limit, last_speed_limit_fetch, current_is_active, last_control_poll, shm_writer
+
+    # Initialize shared memory writer for warning system
+    try:
+        shm_writer = shared_memory_bridge.SensorDataWriter(create_new=True)
+        print("✓ Shared memory bridge initialized for warning system")
+    except Exception as e:
+        print(f"⚠ Shared memory init failed: {e}")
+        print("  Warning system will not receive data")
+        shm_writer = None
 
     # Initialize and Authenticate Firebase
     try:
@@ -483,6 +441,10 @@ def main():
         last_fb_push = 0.0
         sample_count = 0
         
+        # Reset batch buffer for this ride
+        with batch_buffer_lock:
+            batch_buffer.clear()
+        
         # Pre-allocate variables to avoid lookups
         sample_interval = SAMPLE_INTERVAL
         fb_interval = FIREBASE_PUSH_INTERVAL_S
@@ -502,31 +464,13 @@ def main():
                 # CRITICAL SECTION: Single atomic read - minimize lock time
                 with data_lock:
                     mpu = latest_mpu  # Tuple copy (fast)
-                    lat, lon, gps_speed = latest_gps  # Unpack directly
+                    lat, lon, spd = latest_gps  # Unpack directly (speed already handled by GPS thread)
                     speed_limit = latest_speed_limit
+                    speed_source = latest_speed_source  # Read speed source set by GPS thread
 
-                # Compute speed inline (avoid function call overhead)
-                # Use GPS if available, otherwise use accelerometer
-                t_wall = time.time()
-                gps_is_stale = (t_wall - gps_last_update_time) > GPS_TIMEOUT_SECONDS
-                
-                if gps_speed is not None and not gps_is_stale and 0 <= gps_speed <= 300:
-                    spd = gps_speed
-                    speed_source = "GPS"
-                else:
-                    # Accelerometer fallback (simplified inline)
-                    with speed_calculation_lock:
-                        if last_speed_calc_ts is not None:
-                            dt = time.perf_counter() - last_speed_calc_ts
-                            accel = last_accel_ms2 if abs(last_accel_ms2) >= 0.2 else 0.0
-                            current_speed_ms_local = max(0.0, current_speed_ms + accel * dt)
-                            current_speed_ms = current_speed_ms_local
-                        last_speed_calc_ts = time.perf_counter()
-                        spd = current_speed_ms * 3.6
-                    speed_source = "ACCEL"
-
-                # Get timestamp (raw integer - formatting done in CSV writer)
-                timestamp_ms = int(t_wall * 1000)
+                # Get timestamp
+                timestamp_ms = int(time.time() * 1000)
+                t_wall = time.time()  # For Firebase timing
                 
                 # Image path lookup - do in background or skip for performance
                 # For 100 Hz, we skip this in main loop and handle in CSV writer if needed
@@ -566,6 +510,31 @@ def main():
                 except:
                     pass  # Queue full, skip this sample
 
+                # Add to batch buffer for shared memory (warning system)
+                if shm_writer is not None:
+                    with batch_buffer_lock:
+                        # Store point as tuple: (timestamp, acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z, lat, lon, speed, speed_limit)
+                        batch_point = (
+                            timestamp_ms / 1000.0,  # Convert to seconds for consistency
+                            mpu[0], mpu[1], mpu[2],  # accelerations
+                            mpu[3], mpu[4], mpu[5],  # gyroscope
+                            lat if lat is not None else 0.0,
+                            lon if lon is not None else 0.0,
+                            spd,
+                            speed_limit if speed_limit is not None else 0.0
+                        )
+                        batch_buffer.append(batch_point)
+                        
+                        # When we have 104 points, write to shared memory
+                        if len(batch_buffer) >= 104:
+                            success = shm_writer.write_batch(batch_buffer[:104])
+                            if success:
+                                # Keep only the overflow points (should be 0 or very few)
+                                batch_buffer[:] = batch_buffer[104:]
+                            else:
+                                # On write failure, clear buffer to avoid memory buildup
+                                batch_buffer.clear()
+
                 # Increment sample counter
                 sample_count += 1
                 
@@ -588,7 +557,7 @@ def main():
                                 'user_id': USER_ID,
                                 'ax': mpu[0], 'ay': mpu[1], 'az': mpu[2],
                                 'gx': mpu[3], 'gy': mpu[4], 'gz': mpu[5],
-                                'ts': target_timestamp_ms
+                                'ts': timestamp_ms
                             })
                         except:
                             pass
@@ -619,6 +588,15 @@ def main():
             gps_serial.close()
         except Exception:
             pass
+    
+    # Cleanup shared memory
+    if shm_writer:
+        try:
+            shm_writer.cleanup()
+            print("✓ Shared memory cleaned up")
+        except Exception as e:
+            print(f"⚠ Shared memory cleanup warning: {e}")
+    
     print("Log complete.")
             
 if __name__ == '__main__':
