@@ -7,7 +7,7 @@ import csv
 import numpy as np
 import h5py
 from dataclasses import dataclass
-from typing import List
+from typing import List, Dict
 import tensorflow as tf
 from tensorflow import keras
 from keras.models import Sequential
@@ -48,6 +48,8 @@ csv_lock = threading.Lock()
 # Warning tuple: [overspeeding, bump, pothole, speedy_turns, harsh_braking, sudden_accel]
 warning_state = [0, 0, 0, 0, 0, 0]
 warning_lock = threading.Lock()
+warning_payload: Dict[str, Dict[str, float | str | int]] = {}
+warning_payload_lock = threading.Lock()
 
 # LSTM model output tracking
 lstm_last_prediction = "UNKNOWN"  # Last predicted class: BUMP, LEFT, RIGHT, STOP, STRAIGHT
@@ -193,8 +195,13 @@ POTHOLE_Z_THRESHOLD = 2.5  # m/s^2 vertical acceleration spike
 
 def update_warning(index: int, value: int):
     """Thread-safe warning update"""
+    changed = False
     with warning_lock:
-        warning_state[index] = value
+        if warning_state[index] != value:
+            warning_state[index] = value
+            changed = True
+    if changed:
+        rebuild_warning_payload()
 
 def update_lstm_prediction(prediction: str):
     """Thread-safe LSTM prediction update"""
@@ -582,6 +589,42 @@ def get_warnings() -> list:
     """Get current warning state"""
     with warning_lock:
         return warning_state.copy()
+
+
+def rebuild_warning_payload():
+    """Rebuild structured warning payload dictionary from warning_state.
+
+    Format (keys are stable so Firebase replaces, not accumulates):
+    {
+        'overspeeding': { 'type': 'overspeeding', 'message': 'Speed Limit Exceeded', 'timestamp': <ms> },
+        'bump': {...}, ...
+    }
+    Only active warnings included; empty dict clears active_warnings upstream.
+    """
+    names = [
+        ('overspeeding', 'Speed Limit Exceeded'),
+        ('bump', 'Bump Detected'),
+        ('pothole', 'Pothole Detected'),
+        ('speedy_turns', 'Speedy Turn'),
+        ('harsh_braking', 'Harsh Braking'),
+        ('sudden_accel', 'Sudden Acceleration')
+    ]
+    ts_ms = int(time.time() * 1000)
+    out: Dict[str, Dict[str, float | str | int]] = {}
+    with warning_lock:
+        for i, flag in enumerate(warning_state):
+            if flag == 1:
+                slug, msg = names[i]
+                out[slug] = {'type': slug, 'message': msg, 'timestamp': ts_ms}
+    with warning_payload_lock:
+        global warning_payload
+        warning_payload = out
+
+
+def get_warning_payload() -> Dict[str, Dict[str, float | str | int]]:
+    """Return current structured warning payload (active warnings only)."""
+    with warning_payload_lock:
+        return warning_payload.copy()
 
 
 def write_batch_to_csv(batch: List[SensorData], lstm_prediction: str, warnings: list):

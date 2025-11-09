@@ -12,6 +12,9 @@ import gps_utils  # type: ignore
 import speed_limit_utils  # type: ignore
 import firebase_uploader  # type: ignore
 import shared_memory_bridge  # type: ignore
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'Warning Generation Algorithm'))
+import Warning_Generate as warning_generate  # type: ignore
 
 TARGET_HZ = 104
 SAMPLE_INTERVAL = 1.0 / TARGET_HZ
@@ -362,7 +365,7 @@ def wait_until_active(ride_id: str | None = None, poll_interval: float = 0.5):
 def main():
     global latest_speed_limit, last_speed_limit_fetch, current_is_active, last_control_poll, shm_writer
 
-    # Initialize shared memory writer for warning system
+    # Initialize shared memory writer for warning system (sensor batch bridge)
     try:
         shm_writer = shared_memory_bridge.SensorDataWriter(create_new=True)
         print("✓ Shared memory bridge initialized for warning system")
@@ -370,6 +373,13 @@ def main():
         print(f"⚠ Shared memory init failed: {e}")
         print("  Warning system will not receive data")
         shm_writer = None
+
+    # Start warning generation threads (they will read from shared memory)
+    try:
+        warning_threads = warning_generate.start_warning_system()
+        print(f"✓ Started {len(warning_threads)} warning generation threads")
+    except Exception as e:
+        print(f"⚠ Failed to start warning system threads: {e}")
 
     # Initialize and Authenticate Firebase
     try:
@@ -550,6 +560,7 @@ def main():
 
                 # Queue Firebase push periodically
                 if (t_wall - last_fb_push) >= fb_interval:
+                    # MPU snapshot
                     if all(v is not None for v in mpu):
                         try:
                             firebase_push_queue.put_nowait({
@@ -561,18 +572,20 @@ def main():
                             })
                         except:
                             pass
-                    
+
+                    # Consolidated speed + active warnings (from warning_generate)
                     try:
-                        warnings = firebase_uploader.build_speeding_warning(spd, speed_limit)
+                        active_warnings = warning_generate.get_warning_payload()
                         firebase_push_queue.put_nowait({
                             'type': 'speed',
                             'user_id': USER_ID,
                             'speed': spd,
                             'limit': speed_limit,
-                            'warnings': warnings
+                            'warnings': active_warnings
                         })
-                    except:
+                    except Exception as e:
                         pass
+
                     last_fb_push = t_wall
 
         except KeyboardInterrupt:
