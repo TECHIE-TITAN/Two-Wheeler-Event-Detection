@@ -3,6 +3,7 @@ import time
 import os
 import re
 import sys
+import csv
 import numpy as np
 import h5py
 from dataclasses import dataclass
@@ -39,6 +40,10 @@ data_lock = threading.Lock()
 # Shared memory reader for receiving data from main2.py
 shm_reader = None
 shm_read_thread_active = False
+
+# CSV logging
+CSV_FILENAME = "warnings.csv"
+csv_lock = threading.Lock()
 
 # Warning tuple: [overspeeding, bump, pothole, speedy_turns, harsh_braking, sudden_accel]
 warning_state = [0, 0, 0, 0, 0, 0]
@@ -579,6 +584,60 @@ def get_warnings() -> list:
         return warning_state.copy()
 
 
+def write_batch_to_csv(batch: List[SensorData], lstm_prediction: str, warnings: list):
+    """Write batch of 104 rows to CSV with LSTM prediction and warnings columns
+    
+    Args:
+        batch: List of 104 SensorData objects
+        lstm_prediction: LSTM prediction for this batch (same value for all 104 rows)
+        warnings: Warning state list for this batch (same value for all 104 rows)
+    """
+    if len(batch) != BATCH_SIZE:
+        print(f"⚠ Warning: Batch size {len(batch)} != {BATCH_SIZE}, skipping CSV write")
+        return
+    
+    # Convert warnings list to string representation
+    warning_names = ["Overspeeding", "Bump", "Pothole", "Speedy Turns", "Harsh Braking", "Sudden Accel"]
+    active_warnings = [warning_names[i] for i, w in enumerate(warnings) if w == 1]
+    warnings_str = ','.join(active_warnings) if active_warnings else "None"
+    
+    with csv_lock:
+        # Check if file exists to determine if we need to write header
+        file_exists = os.path.isfile(CSV_FILENAME)
+        
+        with open(CSV_FILENAME, 'a', newline='') as csvfile:
+            fieldnames = [
+                'timestamp', 'accel_x', 'accel_y', 'accel_z',
+                'angular_x', 'angular_y', 'angular_z',
+                'latitude', 'longitude', 'speed', 'speed_limit',
+                'lstm_prediction', 'warnings'
+            ]
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            
+            # Write header if file is new
+            if not file_exists:
+                writer.writeheader()
+            
+            # Write all 104 rows with same LSTM prediction and warnings
+            for point in batch:
+                row = {
+                    'timestamp': point.timestamp,
+                    'accel_x': point.accel_x,
+                    'accel_y': point.accel_y,
+                    'accel_z': point.accel_z,
+                    'angular_x': point.angular_x,
+                    'angular_y': point.angular_y,
+                    'angular_z': point.angular_z,
+                    'latitude': point.latitude,
+                    'longitude': point.longitude,
+                    'speed': point.speed,
+                    'speed_limit': point.speed_limit,
+                    'lstm_prediction': lstm_prediction,
+                    'warnings': warnings_str
+                }
+                writer.writerow(row)
+
+
 def start_warning_system():
     """Initialize and start all monitoring threads"""
     threads = [
@@ -628,8 +687,14 @@ def main():
             
             batch_counter += 1
             
+            # Get current batch, warnings, and LSTM prediction
+            current_batch = get_current_data_batch()
             warnings = get_warnings()
             lstm_pred = get_lstm_prediction()
+            
+            # Write batch to CSV
+            write_batch_to_csv(current_batch, lstm_pred, warnings)
+            
             warning_names = [
                 "Overspeeding", "Bump", "Pothole",
                 "Speedy Turns", "Harsh Braking", "Sudden Accel"
@@ -642,6 +707,7 @@ def main():
                 print(f"  ⚠ Active warnings: {', '.join(active_warnings)}")
             else:
                 print(f"  ✓ No warnings")
+            print(f"  📝 Written to {CSV_FILENAME}")
             
             time.sleep(1.0)  # Display update rate (1 Hz)
             
