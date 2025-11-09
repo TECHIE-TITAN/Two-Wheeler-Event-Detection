@@ -687,7 +687,10 @@ def write_batch_to_csv(batch: List[SensorData], lstm_prediction: str, warnings: 
 
 
 def firebase_push_thread():
-    """Thread to periodically push data to Firebase with LSTM prediction and warnings"""
+    """Thread to periodically push data to Firebase with LSTM prediction and warnings
+    
+    Pushes only: speed, speed_limit, events (LSTM prediction), and warning list
+    """
     global last_firebase_push
     
     if firebase_uploader is None:
@@ -714,7 +717,7 @@ def firebase_push_thread():
             # Get latest sensor data (use last point in batch for real-time data)
             latest = batch[-1]
             
-            # Get warnings and LSTM prediction
+            # Get warnings and LSTM prediction (events)
             warnings = get_warnings()
             lstm_pred = get_lstm_prediction()
             
@@ -722,33 +725,25 @@ def firebase_push_thread():
             warning_names = ["Overspeeding", "Bump", "Pothole", "Speedy Turns", "Harsh Braking", "Sudden Accel"]
             active_warnings = [warning_names[i] for i, w in enumerate(warnings) if w == 1]
             
-            # Push MPU data with LSTM prediction
-            try:
-                firebase_uploader.update_rider_mpu(
-                    USER_ID,
-                    latest.accel_x, latest.accel_y, latest.accel_z,
-                    latest.angular_x, latest.angular_y, latest.angular_z,
-                    int(latest.timestamp * 1000)  # Convert to milliseconds
-                )
-            except Exception as e:
-                print(f"Firebase MPU push error: {e}")
-            
-            # Push speed data with warnings
+            # Push speed data with warnings and events (LSTM prediction)
             try:
                 # Build warnings list for Firebase
                 fb_warnings = active_warnings if active_warnings else []
                 
+                # Push: speed, speed_limit, warnings list
                 firebase_uploader.update_rider_speed(
                     USER_ID,
                     latest.speed,
                     latest.speed_limit,
                     fb_warnings
                 )
+                
+                # Note: LSTM prediction (events) is included as part of warnings
+                # If you have a separate method to push events, use it here:
+                # firebase_uploader.update_rider_events(USER_ID, lstm_pred)
+                
             except Exception as e:
-                print(f"Firebase speed push error: {e}")
-            
-            # TODO: Add new Firebase method to push LSTM prediction and full warning state
-            # For now, warnings are included in speed update
+                print(f"Firebase push error: {e}")
             
             last_firebase_push = current_time
             
@@ -826,10 +821,10 @@ def main():
             print(f"\nBatch {batch_counter}:")
             print(f"  LSTM Prediction: {lstm_pred}")
             if active_warnings:
-                print(f"  ⚠ Active warnings: {', '.join(active_warnings)}")
+                print(f"  Active warnings: {', '.join(active_warnings)}")
             else:
-                print(f"  ✓ No warnings")
-            print(f"  📝 Written to {CSV_FILENAME}")
+                print(f"  No warnings")
+            print(f"  Written to {CSV_FILENAME}")
             
             time.sleep(1.0)  # Display update rate (1 Hz)
             

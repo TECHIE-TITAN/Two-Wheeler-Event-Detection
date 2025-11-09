@@ -489,18 +489,6 @@ def main():
                     time.sleep(2.0)
                     
                     try:
-                        # Upload the raw data CSV file to Firebase
-                        upload_success = firebase_uploader.upload_raw_data_to_firebase(
-                            USER_ID, ride_id, csv_filename
-                        )
-                        if upload_success:
-                            print(f"✓ Raw data CSV uploaded for ride {ride_id}")
-                        else:
-                            print(f"✗ Failed to upload raw data CSV for ride {ride_id}")
-                    except Exception as e:
-                        print(f"✗ Error uploading raw data CSV: {e}")
-                    
-                    try:
                         # Upload the warnings CSV file from Warning_Generate.py
                         warnings_csv = f"../Warning Generation Algorithm/warnings_{ride_id}.csv"
                         if os.path.exists(warnings_csv):
