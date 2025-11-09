@@ -7,7 +7,7 @@ import csv
 import numpy as np
 import h5py
 from dataclasses import dataclass
-from typing import List, Dict
+from typing import List
 import tensorflow as tf
 from tensorflow import keras
 from keras.models import Sequential
@@ -42,14 +42,27 @@ shm_reader = None
 shm_read_thread_active = False
 
 # CSV logging
-CSV_FILENAME = "warnings.csv"
+current_ride_id = None
+CSV_FILENAME = "warnings.csv"  # Will be updated to warnings_{ride_id}.csv when ride starts
 csv_lock = threading.Lock()
+
+# Firebase integration
+firebase_uploader = None
+USER_ID = "OYFNMBRHiPduTdplwnSIa2dxdwx1"
+FIREBASE_PUSH_INTERVAL_S = 7.0
+last_firebase_push = 0.0
+
+# Import firebase_uploader from Hardware Source Codes
+try:
+    import firebase_uploader  # type: ignore
+    print("✓ Firebase uploader imported")
+except Exception as e:
+    print(f"⚠ Firebase uploader import failed: {e}")
+    firebase_uploader = None
 
 # Warning tuple: [overspeeding, bump, pothole, speedy_turns, harsh_braking, sudden_accel]
 warning_state = [0, 0, 0, 0, 0, 0]
 warning_lock = threading.Lock()
-warning_payload: Dict[str, Dict[str, float | str | int]] = {}
-warning_payload_lock = threading.Lock()
 
 # LSTM model output tracking
 lstm_last_prediction = "UNKNOWN"  # Last predicted class: BUMP, LEFT, RIGHT, STOP, STRAIGHT
@@ -195,13 +208,8 @@ POTHOLE_Z_THRESHOLD = 2.5  # m/s^2 vertical acceleration spike
 
 def update_warning(index: int, value: int):
     """Thread-safe warning update"""
-    changed = False
     with warning_lock:
-        if warning_state[index] != value:
-            warning_state[index] = value
-            changed = True
-    if changed:
-        rebuild_warning_payload()
+        warning_state[index] = value
 
 def update_lstm_prediction(prediction: str):
     """Thread-safe LSTM prediction update"""
@@ -517,7 +525,7 @@ def update_sensor_data_batch(new_batch: List[SensorData]):
 
 def shared_memory_reader_thread():
     """Thread to continuously read batches from shared memory and update current_data_batch"""
-    global shm_reader, shm_read_thread_active, current_data_batch
+    global shm_reader, shm_read_thread_active, current_data_batch, current_ride_id, CSV_FILENAME
     
     print("⏳ Shared memory reader thread starting...")
     
@@ -534,6 +542,7 @@ def shared_memory_reader_thread():
     shm_read_thread_active = True
     last_read_time = time.time()
     read_count = 0
+    ride_initialized = False
     
     while shm_read_thread_active:
         try:
@@ -541,6 +550,38 @@ def shared_memory_reader_thread():
             batch_dict = shm_reader.read_batch_as_dict()
             
             if batch_dict is not None:
+                # Check for ride start signal (negative timestamp = ride_id encoded)
+                first_timestamp = batch_dict['timestamps'][0]
+                if first_timestamp < 0:
+                    # Ride start signal - extract ride_id
+                    ride_id = str(int(abs(first_timestamp)))
+                    current_ride_id = ride_id
+                    CSV_FILENAME = f"warnings_{ride_id}.csv"
+                    ride_initialized = True
+                    print(f"🚀 New ride started: ride_id={ride_id}")
+                    print(f"📝 Logging to {CSV_FILENAME}")
+                    time.sleep(0.1)
+                    continue
+                
+                # Check for ride end signal (all timestamps are 0)
+                if np.all(batch_dict['timestamps'] == 0):
+                    print(f"📍 Received ride end signal for ride {current_ride_id}")
+                    # Clear current batch and wait for next ride
+                    with data_lock:
+                        current_data_batch = []
+                    ride_initialized = False
+                    print(f"✓ Ride {current_ride_id} completed")
+                    current_ride_id = None
+                    print("⏳ Waiting for next ride...")
+                    time.sleep(1.0)
+                    continue
+                
+                # Normal data - ensure ride is initialized
+                if not ride_initialized:
+                    print("⚠ Received data but ride not initialized, waiting for start signal...")
+                    time.sleep(0.5)
+                    continue
+                
                 # Convert to SensorData objects
                 new_batch = []
                 for i in range(BATCH_SIZE):
@@ -589,42 +630,6 @@ def get_warnings() -> list:
     """Get current warning state"""
     with warning_lock:
         return warning_state.copy()
-
-
-def rebuild_warning_payload():
-    """Rebuild structured warning payload dictionary from warning_state.
-
-    Format (keys are stable so Firebase replaces, not accumulates):
-    {
-        'overspeeding': { 'type': 'overspeeding', 'message': 'Speed Limit Exceeded', 'timestamp': <ms> },
-        'bump': {...}, ...
-    }
-    Only active warnings included; empty dict clears active_warnings upstream.
-    """
-    names = [
-        ('overspeeding', 'Speed Limit Exceeded'),
-        ('bump', 'Bump Detected'),
-        ('pothole', 'Pothole Detected'),
-        ('speedy_turns', 'Speedy Turn'),
-        ('harsh_braking', 'Harsh Braking'),
-        ('sudden_accel', 'Sudden Acceleration')
-    ]
-    ts_ms = int(time.time() * 1000)
-    out: Dict[str, Dict[str, float | str | int]] = {}
-    with warning_lock:
-        for i, flag in enumerate(warning_state):
-            if flag == 1:
-                slug, msg = names[i]
-                out[slug] = {'type': slug, 'message': msg, 'timestamp': ts_ms}
-    with warning_payload_lock:
-        global warning_payload
-        warning_payload = out
-
-
-def get_warning_payload() -> Dict[str, Dict[str, float | str | int]]:
-    """Return current structured warning payload (active warnings only)."""
-    with warning_payload_lock:
-        return warning_payload.copy()
 
 
 def write_batch_to_csv(batch: List[SensorData], lstm_prediction: str, warnings: list):
@@ -681,6 +686,79 @@ def write_batch_to_csv(batch: List[SensorData], lstm_prediction: str, warnings: 
                 writer.writerow(row)
 
 
+def firebase_push_thread():
+    """Thread to periodically push data to Firebase with LSTM prediction and warnings"""
+    global last_firebase_push
+    
+    if firebase_uploader is None:
+        print("⚠ Firebase uploader not available, skipping Firebase push thread")
+        return
+    
+    print("🔥 Firebase push thread started")
+    
+    while shm_read_thread_active:
+        try:
+            current_time = time.time()
+            
+            # Check if it's time to push
+            if (current_time - last_firebase_push) < FIREBASE_PUSH_INTERVAL_S:
+                time.sleep(0.5)
+                continue
+            
+            # Get current batch and warnings
+            batch = get_current_data_batch()
+            if len(batch) < BATCH_SIZE:
+                time.sleep(0.5)
+                continue
+            
+            # Get latest sensor data (use last point in batch for real-time data)
+            latest = batch[-1]
+            
+            # Get warnings and LSTM prediction
+            warnings = get_warnings()
+            lstm_pred = get_lstm_prediction()
+            
+            # Convert warnings to list of strings
+            warning_names = ["Overspeeding", "Bump", "Pothole", "Speedy Turns", "Harsh Braking", "Sudden Accel"]
+            active_warnings = [warning_names[i] for i, w in enumerate(warnings) if w == 1]
+            
+            # Push MPU data with LSTM prediction
+            try:
+                firebase_uploader.update_rider_mpu(
+                    USER_ID,
+                    latest.accel_x, latest.accel_y, latest.accel_z,
+                    latest.angular_x, latest.angular_y, latest.angular_z,
+                    int(latest.timestamp * 1000)  # Convert to milliseconds
+                )
+            except Exception as e:
+                print(f"Firebase MPU push error: {e}")
+            
+            # Push speed data with warnings
+            try:
+                # Build warnings list for Firebase
+                fb_warnings = active_warnings if active_warnings else []
+                
+                firebase_uploader.update_rider_speed(
+                    USER_ID,
+                    latest.speed,
+                    latest.speed_limit,
+                    fb_warnings
+                )
+            except Exception as e:
+                print(f"Firebase speed push error: {e}")
+            
+            # TODO: Add new Firebase method to push LSTM prediction and full warning state
+            # For now, warnings are included in speed update
+            
+            last_firebase_push = current_time
+            
+        except Exception as e:
+            print(f"Firebase push thread error: {e}")
+            time.sleep(1.0)
+    
+    print("🔥 Firebase push thread stopped")
+
+
 def start_warning_system():
     """Initialize and start all monitoring threads"""
     threads = [
@@ -690,7 +768,8 @@ def start_warning_system():
         threading.Thread(target=pothole_detection_thread, daemon=True, name="Pothole"),
         threading.Thread(target=speedy_turns_thread, daemon=True, name="SpeedyTurns"),
         threading.Thread(target=harsh_braking_thread, daemon=True, name="HarshBraking"),
-        threading.Thread(target=sudden_acceleration_thread, daemon=True, name="SuddenAccel")
+        threading.Thread(target=sudden_acceleration_thread, daemon=True, name="SuddenAccel"),
+        threading.Thread(target=firebase_push_thread, daemon=True, name="FirebasePush")
     ]
     
     print("Starting warning generation system...")

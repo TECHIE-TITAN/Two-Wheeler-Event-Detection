@@ -12,9 +12,6 @@ import gps_utils  # type: ignore
 import speed_limit_utils  # type: ignore
 import firebase_uploader  # type: ignore
 import shared_memory_bridge  # type: ignore
-import sys
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'Warning Generation Algorithm'))
-import Warning_Generate as warning_generate  # type: ignore
 
 TARGET_HZ = 104
 SAMPLE_INTERVAL = 1.0 / TARGET_HZ
@@ -32,9 +29,9 @@ CSV_FILENAME = "sensor_data.csv"
 
 # Queues for async I/O
 csv_write_queue = Queue(maxsize=2000)  # Buffer up to 2000 samples
-firebase_push_queue = Queue(maxsize=100)
 print_queue = Queue(maxsize=100)  # For console output
 control_poll_queue = Queue(maxsize=1)  # For control flag updates
+# Note: Firebase push logic moved to Warning_Generate.py
 
 data_lock = threading.Lock()
 latest_mpu = (None, None, None, None, None, None)
@@ -287,25 +284,6 @@ def print_worker_thread():
         except Empty:
             continue
 
-def firebase_worker_thread():
-    """Background thread to handle Firebase pushes."""
-    while not stop_event.is_set():
-        try:
-            task = firebase_push_queue.get(timeout=0.1)
-            if task['type'] == 'mpu':
-                firebase_uploader.update_rider_mpu(
-                    task['user_id'], task['ax'], task['ay'], task['az'],
-                    task['gx'], task['gy'], task['gz'], task['ts']
-                )
-            elif task['type'] == 'speed':
-                firebase_uploader.update_rider_speed(
-                    task['user_id'], task['speed'], task['limit'], task['warnings']
-                )
-        except Empty:
-            continue
-        except Exception as e:
-            print(f"Firebase worker error: {e}")
-
 def control_poll_thread():
     """Background thread to periodically poll control flags."""
     global current_is_active, last_control_poll
@@ -365,7 +343,7 @@ def wait_until_active(ride_id: str | None = None, poll_interval: float = 0.5):
 def main():
     global latest_speed_limit, last_speed_limit_fetch, current_is_active, last_control_poll, shm_writer
 
-    # Initialize shared memory writer for warning system (sensor batch bridge)
+    # Initialize shared memory writer for warning system
     try:
         shm_writer = shared_memory_bridge.SensorDataWriter(create_new=True)
         print("✓ Shared memory bridge initialized for warning system")
@@ -373,13 +351,6 @@ def main():
         print(f"⚠ Shared memory init failed: {e}")
         print("  Warning system will not receive data")
         shm_writer = None
-
-    # Start warning generation threads (they will read from shared memory)
-    try:
-        warning_threads = warning_generate.start_warning_system()
-        print(f"✓ Started {len(warning_threads)} warning generation threads")
-    except Exception as e:
-        print(f"⚠ Failed to start warning system threads: {e}")
 
     # Initialize and Authenticate Firebase
     try:
@@ -416,8 +387,8 @@ def main():
     threads.append(threading.Thread(target=speed_limit_thread, daemon=True))
     threads.append(threading.Thread(target=update_image_cache, daemon=True))
     threads.append(threading.Thread(target=print_worker_thread, daemon=True))
-    threads.append(threading.Thread(target=firebase_worker_thread, daemon=True))
     threads.append(threading.Thread(target=control_poll_thread, daemon=True))
+    # Note: Firebase worker thread removed - now handled by Warning_Generate.py
     
     for t in threads:
         t.start()
@@ -454,6 +425,15 @@ def main():
         # Reset batch buffer for this ride
         with batch_buffer_lock:
             batch_buffer.clear()
+        
+        # Send ride start signal with ride_id encoded in shared memory
+        if shm_writer is not None:
+            # Encode ride_id in first timestamp field (negative value as marker, abs value as ride_id)
+            ride_id_num = float(ride_id) if ride_id.isdigit() else 0.0
+            start_signal = [(-1.0 * ride_id_num, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0) for _ in range(104)]
+            shm_writer.write_batch(start_signal)
+            print(f"📍 Sent ride start signal (ride_id={ride_id}) to Warning_Generate.py")
+            time.sleep(0.1)  # Give Warning_Generate.py time to process
         
         # Pre-allocate variables to avoid lookups
         sample_interval = SAMPLE_INTERVAL
@@ -494,22 +474,47 @@ def main():
                     # Ride has ended - wait for queue to drain, then upload
                     print(f"\nRide {ride_id} ended. Flushing data...")
                     
+                    # Send null data signal to Warning_Generate.py (all zeros)
+                    if shm_writer is not None:
+                        null_batch = [(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0) for _ in range(104)]
+                        shm_writer.write_batch(null_batch)
+                        print("📍 Sent ride end signal to Warning_Generate.py")
+                    
                     # Wait for CSV queue to empty (with timeout)
                     timeout = time.time() + 5.0
                     while not csv_write_queue.empty() and time.time() < timeout:
                         time.sleep(0.1)
                     
+                    # Wait a bit for Warning_Generate.py to finish writing its CSV
+                    time.sleep(2.0)
+                    
                     try:
-                        # Upload the CSV file to Firebase
+                        # Upload the raw data CSV file to Firebase
                         upload_success = firebase_uploader.upload_raw_data_to_firebase(
                             USER_ID, ride_id, csv_filename
                         )
                         if upload_success:
-                            print(f"Raw data successfully uploaded for ride {ride_id}")
+                            print(f"✓ Raw data CSV uploaded for ride {ride_id}")
                         else:
-                            print(f"Failed to upload raw data for ride {ride_id}")
+                            print(f"✗ Failed to upload raw data CSV for ride {ride_id}")
                     except Exception as e:
-                        print(f"Error uploading raw data: {e}")
+                        print(f"✗ Error uploading raw data CSV: {e}")
+                    
+                    try:
+                        # Upload the warnings CSV file from Warning_Generate.py
+                        warnings_csv = f"../Warning Generation Algorithm/warnings_{ride_id}.csv"
+                        if os.path.exists(warnings_csv):
+                            upload_success = firebase_uploader.upload_raw_data_to_firebase(
+                                USER_ID, ride_id, warnings_csv
+                            )
+                            if upload_success:
+                                print(f"✓ Warnings CSV uploaded for ride {ride_id}")
+                            else:
+                                print(f"✗ Failed to upload warnings CSV for ride {ride_id}")
+                        else:
+                            print(f"⚠ Warnings CSV not found: {warnings_csv}")
+                    except Exception as e:
+                        print(f"✗ Error uploading warnings CSV: {e}")
                     
                     # Break out of the inner loop to start new ride
                     break
@@ -557,36 +562,8 @@ def main():
                         print_queue.put_nowait(msg)
                     except:
                         pass
-
-                # Queue Firebase push periodically
-                if (t_wall - last_fb_push) >= fb_interval:
-                    # MPU snapshot
-                    if all(v is not None for v in mpu):
-                        try:
-                            firebase_push_queue.put_nowait({
-                                'type': 'mpu',
-                                'user_id': USER_ID,
-                                'ax': mpu[0], 'ay': mpu[1], 'az': mpu[2],
-                                'gx': mpu[3], 'gy': mpu[4], 'gz': mpu[5],
-                                'ts': timestamp_ms
-                            })
-                        except:
-                            pass
-
-                    # Consolidated speed + active warnings (from warning_generate)
-                    try:
-                        active_warnings = warning_generate.get_warning_payload()
-                        firebase_push_queue.put_nowait({
-                            'type': 'speed',
-                            'user_id': USER_ID,
-                            'speed': spd,
-                            'limit': speed_limit,
-                            'warnings': active_warnings
-                        })
-                    except Exception as e:
-                        pass
-
-                    last_fb_push = t_wall
+                
+                # Note: Firebase push logic moved to Warning_Generate.py
 
         except KeyboardInterrupt:
             print("\nStopping logging...")
