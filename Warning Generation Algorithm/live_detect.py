@@ -1,71 +1,76 @@
-import cv2
+import time
 import supervision as sv
 from inference.models.utils import get_model
-import time # Added to calculate FPS
+from picamera2 import Picamera2 # The RPi camera library
+import cv2 # Still needed for font/color definitions
 
 # --- 1. Define Your Variables ---
-
-# Switch between your models here
-MODEL_ID = "pothole-xjwqu/3"
-# MODEL_ID = "speed-bumps-detection-61eef/7"
-
 API_KEY = "rRFoNCvmMJDVJrriVS1o"
+POTHOLE_MODEL_ID = "pothole-xjwqu/3"
+SPEEDBUMP_MODEL_ID = "speed-bumps-detection-61eef/7"
 
-# --- 2. Load the Model (only happens once) ---
-print(f"Loading model {MODEL_ID}...")
-model = get_model(model_id=MODEL_ID, api_key=API_KEY)
+# --- 2. Load BOTH Models ---
+print(f"Loading pothole model: {POTHOLE_MODEL_ID}...")
+pothole_model = get_model(model_id=POTHOLE_MODEL_ID, api_key=API_KEY)
 
-# --- 3. Set up Camera and Annotators ---
-# 0 is your laptop's built-in webcam
-cap = cv2.VideoCapture(0) 
+print(f"Loading speedbump model: {SPEEDBUMP_MODEL_ID}...")
+speedbump_model = get_model(model_id=SPEEDBUMP_MODEL_ID, api_key=API_KEY)
 
-# Check if webcam opened successfully
-if not cap.isOpened():
-    print("Error: Could not open webcam.")
-    exit()
+# --- 3. Set up Pi Camera (picamera2) ---
+print("Configuring Pi Camera...")
+picam2 = Picamera2()
 
-bounding_box_annotator = sv.BoundingBoxAnnotator()
-label_annotator = sv.LabelAnnotator()
+# *** THIS IS YOUR FIX ***
+# Set a very low resolution for fast processing
+config = picam2.create_preview_configuration(main={"size": (320, 240)})
+picam2.configure(config)
+picam2.start()
 
 print("--- Starting Live Detection ---")
-print("Press 'q' in the popup window to quit.")
+print("Press Ctrl+C in the terminal to quit.")
 
 # --- 4. Start the Live Loop ---
-while True:
-    start_time = time.time() # For FPS calculation
+frame_counter = 0 # <-- We need this to alternate
+try:
+    while True:
+        start_time = time.time()
+        frame_counter += 1
+        
+        # Read a new frame
+        frame = picam2.capture_array()
+        frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
-    # Read a new frame
-    ret, frame = cap.read()
-    if not ret:
-        print("Failed to grab frame")
-        break
+        # --- 5. Run inference on ONLY ONE model per frame ---
+        
+        if frame_counter % 2 == 0:
+            # On even frames, check for potholes
+            #print("Checking for POTHOLE...")
+            results = pothole_model.infer(frame_bgr)[0]
+            detections = sv.Detections.from_inference(results)
+            if len(detections) > 0:
+                print("POTHOLE DETECTED!")
+            
+        else:
+            # On odd frames, check for speedbumps
+            #print("Checking for SPEEDBUMP...")
+            results = speedbump_model.infer(frame_bgr)[0]
+            detections = sv.Detections.from_inference(results)
+            if len(detections) > 0:
+                print("SPEEDBUMP DETECTED!")
+        
+        if len(detections) == 0:
+            print("Clear")
 
-    # Run inference
-    results = model.infer(frame)[0]
-    detections = sv.Detections.from_inference(results)
+        # Calculate and print FPS
+        end_time = time.time()
+        if (end_time - start_time) > 0:
+            fps = 1 / (end_time - start_time)
+            print(f"FPS: {fps:.2f}")
 
-    # --- 5. This is your "Return Statement" ---
-    if len(detections) > 0:
-        print("OBJECT DETECTED!")
-    else:
-        print("Clear")
+except KeyboardInterrupt:
+    print("Keyboard interrupt received.")
 
-    # --- 6. (Optional) Show the video window ---
-    annotated_frame = bounding_box_annotator.annotate(scene=frame, detections=detections)
-    annotated_frame = label_annotator.annotate(scene=annotated_frame, detections=detections)
-
-    # Calculate and display FPS
-    end_time = time.time()
-    fps = 1 / (end_time - start_time)
-    cv2.putText(annotated_frame, f"FPS: {int(fps)}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-
-    cv2.imshow("Live Detection", annotated_frame)
-
-    # Check if the 'q' key was pressed
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
-
-# --- 7. Clean up ---
-print("--- Stopping ---")
-cap.release()
-cv2.destroyAllWindows()
+finally:
+    # --- 7. Clean up ---
+    print("--- Stopping Camera ---")
+    picam2.stop()
