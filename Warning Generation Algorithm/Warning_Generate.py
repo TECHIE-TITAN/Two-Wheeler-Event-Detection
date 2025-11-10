@@ -542,46 +542,53 @@ def shared_memory_reader_thread():
     shm_read_thread_active = True
     last_read_time = time.time()
     read_count = 0
-    ride_initialized = False
+    
+    print("⏳ Waiting for ride to start...")
     
     while shm_read_thread_active:
         try:
+            # Check if ride is active using flag
+            ride_active = shm_reader.is_ride_active()
+            
+            if not ride_active:
+                # Ride is inactive - clear batch and wait
+                with data_lock:
+                    current_data_batch = []
+                
+                # If we had a ride_id, it just ended
+                if current_ride_id is not None:
+                    print(f"🛑 Ride {current_ride_id} ended - pausing processing")
+                    current_ride_id = None
+                    CSV_FILENAME = "warnings.csv"  # Reset to default
+                
+                time.sleep(0.5)  # Poll every 500ms when inactive
+                continue
+            
+            # Ride is active - check if it's a new ride
+            ride_id = shm_reader.get_ride_id()
+            if current_ride_id != ride_id:
+                # New ride started
+                current_ride_id = str(ride_id)
+                CSV_FILENAME = f"warnings_{ride_id}.csv"
+                print(f"� New ride started: ride_id={ride_id}")
+                print(f"📝 Writing to: {CSV_FILENAME}")
+                
+                # Initialize CSV file with header
+                with csv_lock:
+                    with open(CSV_FILENAME, 'w', newline='') as csvfile:
+                        fieldnames = [
+                            'timestamp', 'accel_x', 'accel_y', 'accel_z',
+                            'angular_x', 'angular_y', 'angular_z',
+                            'latitude', 'longitude', 'speed', 'speed_limit',
+                            'lstm_prediction', 'warnings'
+                        ]
+                        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                        writer.writeheader()
+            
             # Read batch from shared memory
             batch_dict = shm_reader.read_batch_as_dict()
             
             if batch_dict is not None:
-                # Check for ride start signal (negative timestamp = ride_id encoded)
-                first_timestamp = batch_dict['timestamps'][0]
-                if first_timestamp < 0:
-                    # Ride start signal - extract ride_id
-                    ride_id = str(int(abs(first_timestamp)))
-                    current_ride_id = ride_id
-                    CSV_FILENAME = f"warnings_{ride_id}.csv"
-                    ride_initialized = True
-                    print(f"🚀 New ride started: ride_id={ride_id}")
-                    print(f"📝 Logging to {CSV_FILENAME}")
-                    time.sleep(0.1)
-                    continue
-                
-                # Check for ride end signal (all timestamps are 0)
-                if np.all(batch_dict['timestamps'] == 0):
-                    print(f"📍 Received ride end signal for ride {current_ride_id}")
-                    # Clear current batch and wait for next ride
-                    with data_lock:
-                        current_data_batch = []
-                    ride_initialized = False
-                    print(f"✓ Ride {current_ride_id} completed")
-                    current_ride_id = None
-                    print("⏳ Waiting for next ride...")
-                    time.sleep(1.0)
-                    continue
-                
-                # Normal data - ensure ride is initialized
-                if not ride_initialized:
-                    print("⚠ Received data but ride not initialized, waiting for start signal...")
-                    time.sleep(0.5)
-                    continue
-                
                 # Convert to SensorData objects
                 new_batch = []
                 for i in range(BATCH_SIZE):
@@ -702,6 +709,11 @@ def firebase_push_thread():
     while shm_read_thread_active:
         try:
             current_time = time.time()
+            
+            # Check if ride is active before pushing
+            if shm_reader and not shm_reader.is_ride_active():
+                time.sleep(1.0)
+                continue
             
             # Check if it's time to push
             if (current_time - last_firebase_push) < FIREBASE_PUSH_INTERVAL_S:

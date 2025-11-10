@@ -22,6 +22,10 @@ FIELDS_PER_POINT = 11  # timestamp, acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z,
 SHARED_MEMORY_NAME = "two_wheeler_sensor_data"
 SHARED_MEMORY_SIZE = BATCH_SIZE * FIELDS_PER_POINT * 8  # 8 bytes per float64 = 9152 bytes
 
+# Ride control flag shared memory
+RIDE_FLAG_MEMORY_NAME = "two_wheeler_ride_flag"
+RIDE_FLAG_SIZE = 16  # 8 bytes for ride_active flag + 8 bytes for ride_id
+
 # Field indices for data access
 FIELD_TIMESTAMP = 0
 FIELD_ACC_X = 1
@@ -51,21 +55,31 @@ class SensorDataWriter:
         self.fields_per_point = FIELDS_PER_POINT
         self.shm = None
         self.data_array = None
-        self.new_data_event = None
-        self.write_lock = None
+        self.flag_shm = None
+        self.flag_array = None
         
         try:
             if create_new:
-                # Create new shared memory block
+                # Create new shared memory block for data
                 self.shm = shared_memory.SharedMemory(
                     name=SHARED_MEMORY_NAME,
                     create=True,
                     size=SHARED_MEMORY_SIZE
                 )
+                # Create new shared memory block for ride flag
+                self.flag_shm = shared_memory.SharedMemory(
+                    name=RIDE_FLAG_MEMORY_NAME,
+                    create=True,
+                    size=RIDE_FLAG_SIZE
+                )
             else:
                 # Attach to existing
                 self.shm = shared_memory.SharedMemory(
                     name=SHARED_MEMORY_NAME,
+                    create=False
+                )
+                self.flag_shm = shared_memory.SharedMemory(
+                    name=RIDE_FLAG_MEMORY_NAME,
                     create=False
                 )
             
@@ -76,11 +90,20 @@ class SensorDataWriter:
                 buffer=self.shm.buf
             )
             
+            # Create flag array: [ride_active (0 or 1), ride_id]
+            self.flag_array = np.ndarray(
+                2,  # [ride_active, ride_id]
+                dtype=np.int64,
+                buffer=self.flag_shm.buf
+            )
+            
             # Initialize with zeros
             if create_new:
                 self.data_array.fill(0.0)
+                self.flag_array[0] = 0  # ride_active = 0 (inactive)
+                self.flag_array[1] = 0  # ride_id = 0
             
-            print(f"✓ Writer initialized: {SHARED_MEMORY_SIZE} bytes shared memory")
+            print(f"✓ Writer initialized: {SHARED_MEMORY_SIZE} bytes data + {RIDE_FLAG_SIZE} bytes flag")
             
         except FileExistsError:
             print("⚠ Shared memory already exists. Cleaning up and recreating...")
@@ -146,6 +169,30 @@ class SensorDataWriter:
             print(f"✗ Array write error: {e}")
             return False
     
+    def set_ride_active(self, ride_id):
+        """
+        Set ride as active with given ride_id
+        
+        Args:
+            ride_id: Integer ride identifier
+        """
+        try:
+            self.flag_array[0] = 1  # ride_active = 1
+            self.flag_array[1] = int(ride_id)
+            return True
+        except Exception as e:
+            print(f"✗ Set ride active error: {e}")
+            return False
+    
+    def set_ride_inactive(self):
+        """Set ride as inactive (pauses Warning_Generate.py processing)"""
+        try:
+            self.flag_array[0] = 0  # ride_active = 0
+            return True
+        except Exception as e:
+            print(f"✗ Set ride inactive error: {e}")
+            return False
+    
     def cleanup(self):
         """Clean up shared memory resources"""
         try:
@@ -153,9 +200,15 @@ class SensorDataWriter:
                 self.shm.close()
                 try:
                     self.shm.unlink()  # Only creator should unlink
-                    print("✓ Shared memory cleaned up")
                 except FileNotFoundError:
                     pass
+            if self.flag_shm:
+                self.flag_shm.close()
+                try:
+                    self.flag_shm.unlink()
+                except FileNotFoundError:
+                    pass
+            print("✓ Shared memory cleaned up")
         except Exception as e:
             print(f"⚠ Cleanup warning: {e}")
 
@@ -175,6 +228,8 @@ class SensorDataReader:
         self.fields_per_point = FIELDS_PER_POINT
         self.shm = None
         self.data_array = None
+        self.flag_shm = None
+        self.flag_array = None
         
         start_time = time.time()
         while wait_for_creation:
@@ -182,6 +237,10 @@ class SensorDataReader:
                 # Attach to existing shared memory
                 self.shm = shared_memory.SharedMemory(
                     name=SHARED_MEMORY_NAME,
+                    create=False
+                )
+                self.flag_shm = shared_memory.SharedMemory(
+                    name=RIDE_FLAG_MEMORY_NAME,
                     create=False
                 )
                 break
@@ -196,6 +255,10 @@ class SensorDataReader:
                 name=SHARED_MEMORY_NAME,
                 create=False
             )
+            self.flag_shm = shared_memory.SharedMemory(
+                name=RIDE_FLAG_MEMORY_NAME,
+                create=False
+            )
         
         # Create numpy array view of shared memory
         self.data_array = np.ndarray(
@@ -204,7 +267,14 @@ class SensorDataReader:
             buffer=self.shm.buf
         )
         
-        print(f"✓ Reader initialized: attached to {SHARED_MEMORY_SIZE} bytes")
+        # Create flag array view
+        self.flag_array = np.ndarray(
+            2,  # [ride_active, ride_id]
+            dtype=np.int64,
+            buffer=self.flag_shm.buf
+        )
+        
+        print(f"✓ Reader initialized: attached to {SHARED_MEMORY_SIZE} bytes data + {RIDE_FLAG_SIZE} bytes flag")
     
     def read_batch(self):
         """
@@ -247,12 +317,40 @@ class SensorDataReader:
             print(f"✗ Read dict error: {e}")
             return None
     
+    def is_ride_active(self):
+        """
+        Check if ride is currently active
+        
+        Returns:
+            bool: True if ride is active, False otherwise
+        """
+        try:
+            return bool(self.flag_array[0])
+        except Exception as e:
+            print(f"✗ Read flag error: {e}")
+            return False
+    
+    def get_ride_id(self):
+        """
+        Get current ride ID
+        
+        Returns:
+            int: Current ride ID
+        """
+        try:
+            return int(self.flag_array[1])
+        except Exception as e:
+            print(f"✗ Read ride_id error: {e}")
+            return 0
+    
     def cleanup(self):
         """Clean up reader resources (does not unlink - only writer should)"""
         try:
             if self.shm:
                 self.shm.close()
-                print("✓ Reader closed")
+            if self.flag_shm:
+                self.flag_shm.close()
+            print("✓ Reader closed")
         except Exception as e:
             print(f"⚠ Reader cleanup warning: {e}")
 
@@ -260,15 +358,27 @@ class SensorDataReader:
 # Utility functions
 def cleanup_shared_memory():
     """Utility to clean up orphaned shared memory"""
+    success = True
     try:
         shm = shared_memory.SharedMemory(name=SHARED_MEMORY_NAME, create=False)
         shm.close()
         shm.unlink()
-        print("✓ Orphaned shared memory cleaned up")
-        return True
+        print("✓ Orphaned data shared memory cleaned up")
     except FileNotFoundError:
-        print("✓ No shared memory to clean up")
-        return False
+        print("✓ No data shared memory to clean up")
     except Exception as e:
-        print(f"✗ Cleanup error: {e}")
-        return False
+        print(f"✗ Data memory cleanup error: {e}")
+        success = False
+    
+    try:
+        flag_shm = shared_memory.SharedMemory(name=RIDE_FLAG_MEMORY_NAME, create=False)
+        flag_shm.close()
+        flag_shm.unlink()
+        print("✓ Orphaned flag shared memory cleaned up")
+    except FileNotFoundError:
+        print("✓ No flag shared memory to clean up")
+    except Exception as e:
+        print(f"✗ Flag memory cleanup error: {e}")
+        success = False
+    
+    return success

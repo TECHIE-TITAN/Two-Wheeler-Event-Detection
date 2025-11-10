@@ -426,14 +426,12 @@ def main():
         with batch_buffer_lock:
             batch_buffer.clear()
         
-        # Send ride start signal with ride_id encoded in shared memory
+        # Set ride active flag in shared memory
         if shm_writer is not None:
-            # Encode ride_id in first timestamp field (negative value as marker, abs value as ride_id)
-            ride_id_num = float(ride_id) if ride_id.isdigit() else 0.0
-            start_signal = [(-1.0 * ride_id_num, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0) for _ in range(104)]
-            shm_writer.write_batch(start_signal)
-            print(f"📍 Sent ride start signal (ride_id={ride_id}) to Warning_Generate.py")
-            time.sleep(0.1)  # Give Warning_Generate.py time to process
+            ride_id_num = int(ride_id) if ride_id.isdigit() else 0
+            shm_writer.set_ride_active(ride_id_num)
+            print(f"� Ride {ride_id} activated in shared memory")
+            time.sleep(0.1)  # Give Warning_Generate.py time to detect
         
         # Pre-allocate variables to avoid lookups
         sample_interval = SAMPLE_INTERVAL
@@ -474,11 +472,10 @@ def main():
                     # Ride has ended - wait for queue to drain, then upload
                     print(f"\nRide {ride_id} ended. Flushing data...")
                     
-                    # Send null data signal to Warning_Generate.py (all zeros)
+                    # Set ride inactive flag in shared memory
                     if shm_writer is not None:
-                        null_batch = [(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0) for _ in range(104)]
-                        shm_writer.write_batch(null_batch)
-                        print("📍 Sent ride end signal to Warning_Generate.py")
+                        shm_writer.set_ride_inactive()
+                        print("� Ride deactivated in shared memory")
                     
                     # Wait for CSV queue to empty (with timeout)
                     timeout = time.time() + 5.0
@@ -489,20 +486,16 @@ def main():
                     time.sleep(2.0)
                     
                     try:
-                        # Upload the warnings CSV file from Warning_Generate.py
-                        warnings_csv = f"../Warning Generation Algorithm/warnings_{ride_id}.csv"
-                        if os.path.exists(warnings_csv):
-                            upload_success = firebase_uploader.upload_raw_data_to_firebase(
-                                USER_ID, ride_id, warnings_csv
-                            )
-                            if upload_success:
-                                print(f"✓ Warnings CSV uploaded for ride {ride_id}")
-                            else:
-                                print(f"✗ Failed to upload warnings CSV for ride {ride_id}")
+                        # Upload the CSV file to Firebase
+                        upload_success = firebase_uploader.upload_raw_data_to_firebase(
+                            USER_ID, ride_id, f'warnings_{ride_id}.csv'
+                        )
+                        if upload_success:
+                            print(f"Raw data successfully uploaded for ride {ride_id}")
                         else:
-                            print(f"⚠ Warnings CSV not found: {warnings_csv}")
+                            print(f"Failed to upload raw data for ride {ride_id}")
                     except Exception as e:
-                        print(f"✗ Error uploading warnings CSV: {e}")
+                        print(f"Error uploading raw data: {e}")
                     
                     # Break out of the inner loop to start new ride
                     break
