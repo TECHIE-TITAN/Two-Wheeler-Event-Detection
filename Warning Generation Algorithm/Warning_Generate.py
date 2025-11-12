@@ -821,6 +821,7 @@ def main():
     try:
         batch_counter = 0
         processed_batch_id = 0  # Track which batch we've already processed
+        last_process_time = 0.0  # Track when we last processed a batch
         
         while True:
             # Check if ride is active
@@ -832,7 +833,15 @@ def main():
                     print("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
                     batch_counter = 0
                     processed_batch_id = 0  # Reset for next ride
+                    last_process_time = 0.0  # Reset timer
                 time.sleep(1.0)
+                continue
+            
+            # Check if enough time has passed (1 second throttle)
+            current_time = time.time()
+            if (current_time - last_process_time) < 1.0:
+                # Not enough time passed, wait
+                time.sleep(0.1)
                 continue
             
             # Check if we have a new batch to process
@@ -852,6 +861,7 @@ def main():
             
             batch_counter += 1
             processed_batch_id = current_batch_id
+            last_process_time = current_time  # Update last process time
             
             # Get current batch, warnings, and LSTM prediction
             warnings = get_warnings()
