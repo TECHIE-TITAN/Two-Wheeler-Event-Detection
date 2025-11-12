@@ -55,7 +55,9 @@ last_firebase_push = 0.0
 # Import firebase_uploader from Hardware Source Codes
 try:
     import firebase_uploader  # type: ignore
+    print("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
     print("✓ Firebase uploader imported")
+    print("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
 except Exception as e:
     print(f"⚠ Firebase uploader import failed: {e}")
     firebase_uploader = None
@@ -155,7 +157,9 @@ def load_lstm_model():
         # Load weights
         try:
             model.load_weights(WEIGHTS_PATH)
+            print("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
             print("LSTM model weights loaded successfully")
+            print("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
             return model
         except Exception as e:
             # Try to infer units from error message
@@ -532,7 +536,9 @@ def shared_memory_reader_thread():
     # Wait for and initialize reader
     try:
         shm_reader = shared_memory_bridge.SensorDataReader(wait_for_creation=True, timeout=30.0)
+        print("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
         print("✓ Shared memory reader connected to main2.py")
+        print("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
     except Exception as e:
         print(f"✗ Failed to connect to shared memory: {e}")
         print("  Make sure main2.py is running first!")
@@ -543,7 +549,9 @@ def shared_memory_reader_thread():
     last_read_time = time.time()
     read_count = 0
     
-    print("⏳ Waiting for ride to start...")
+    print("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+    print("Waiting for ride to start...")
+    print("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
     
     while shm_read_thread_active:
         try:
@@ -557,7 +565,9 @@ def shared_memory_reader_thread():
                 
                 # If we had a ride_id, it just ended
                 if current_ride_id is not None:
-                    print(f"🛑 Ride {current_ride_id} ended - pausing processing")
+                    print("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+                    print(f"Ride {current_ride_id} ended - pausing processing")
+                    print("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
                     current_ride_id = None
                     CSV_FILENAME = "warnings.csv"  # Reset to default
                 
@@ -570,8 +580,10 @@ def shared_memory_reader_thread():
                 # New ride started
                 current_ride_id = str(ride_id)
                 CSV_FILENAME = f"warnings_{ride_id}.csv"
-                print(f"� New ride started: ride_id={ride_id}")
-                print(f"📝 Writing to: {CSV_FILENAME}")
+                print("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+                print(f"New ride started: ride_id={ride_id}")
+                print(f"Writing to: {CSV_FILENAME}")
+                print("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
                 
                 # Initialize CSV file with header
                 with csv_lock:
@@ -614,11 +626,11 @@ def shared_memory_reader_thread():
                 read_count += 1
                 
                 # Print stats every 10 batches
-                if read_count % 10 == 0:
-                    elapsed = time.time() - last_read_time
-                    rate = 10 / elapsed if elapsed > 0 else 0
-                    print(f"📊 Received {read_count} batches (rate: {rate:.1f} batches/s)")
-                    last_read_time = time.time()
+                # if read_count % 10 == 0:
+                #     elapsed = time.time() - last_read_time
+                #     rate = 10 / elapsed if elapsed > 0 else 0
+                #     print(f"📊 Received {read_count} batches (rate: {rate:.1f} batches/s)")
+                #     last_read_time = time.time()
             
             # Small sleep to avoid spinning (shared memory is always available)
             time.sleep(0.01)  # 100 Hz polling rate
@@ -704,7 +716,7 @@ def firebase_push_thread():
         print("⚠ Firebase uploader not available, skipping Firebase push thread")
         return
     
-    print("🔥 Firebase push thread started")
+    # print("Firebase push thread started")
     
     while shm_read_thread_active:
         try:
@@ -763,7 +775,7 @@ def firebase_push_thread():
             print(f"Firebase push thread error: {e}")
             time.sleep(1.0)
     
-    print("🔥 Firebase push thread stopped")
+    # print("Firebase push thread stopped")
 
 
 def start_warning_system():
@@ -778,12 +790,15 @@ def start_warning_system():
         threading.Thread(target=sudden_acceleration_thread, daemon=True, name="SuddenAccel"),
         threading.Thread(target=firebase_push_thread, daemon=True, name="FirebasePush")
     ]
-    
+    print("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
     print("Starting warning generation system...")
-    print(f"Batch size: {BATCH_SIZE} data points")
+    # print(f"Batch size: {BATCH_SIZE} data points")
+    print("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+    print("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
     for thread in threads:
         thread.start()
         print(f"Started thread: {thread.name}")
+    print("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
     
     return threads
 
@@ -812,7 +827,9 @@ def main():
             if shm_reader is None or not shm_reader.is_ride_active():
                 # No active ride - wait
                 if batch_counter > 0:
-                    print(f"\n⏳ Ride ended. Waiting for next ride to start...")
+                    print("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+                    print(f"Ride ended. Waiting for next ride to start...")
+                    print("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
                     batch_counter = 0
                 time.sleep(1.0)
                 continue
@@ -838,6 +855,7 @@ def main():
             ]
             
             active_warnings = [warning_names[i] for i, w in enumerate(warnings) if w == 1]
+            print("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
             print(f"\nBatch {batch_counter}:")
             print(f"  LSTM Prediction: {lstm_pred}")
             if active_warnings:
@@ -845,6 +863,7 @@ def main():
             else:
                 print(f"  No warnings")
             print(f"  Written to {CSV_FILENAME}")
+            print("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
             
             time.sleep(1.0)  # Display update rate (1 Hz)
             

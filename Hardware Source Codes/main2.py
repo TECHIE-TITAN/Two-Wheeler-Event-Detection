@@ -191,7 +191,8 @@ def update_image_cache():
                 image_files_cache = files
                 last_image_cache_update = time.time()
         except Exception as e:
-            print(f"Image cache update error: {e}")
+            # print(f"Image cache update error: {e}")
+            pass
         time.sleep(IMAGE_REFRESH_INTERVAL_S)
 
 def get_latest_image_for_timestamp(target_timestamp_ms):
@@ -314,13 +315,16 @@ def wait_until_active(ride_id: str | None = None, poll_interval: float = 0.5):
     Returns the ride_id used. Sets global current_is_active to True once activated or until stop_event set.
     """
     global current_is_active, last_control_poll
-
+    print("--------------------------------------------")
     print("Waiting for ride to be activated remotely...")
+    print("--------------------------------------------")
     while not stop_event.is_set() and not current_is_active:
         # Acquire ride id if not supplied
         try:
             ride_id = firebase_uploader.get_next_ride_id(USER_ID)
+            print("--------------------------------------------")
             print(f"Starting ride id: {ride_id}")
+            print("--------------------------------------------")
         except Exception as e:
             print(f"Firebase ride init failed: {e}")
             ride_id = "0"
@@ -332,7 +336,9 @@ def wait_until_active(ride_id: str | None = None, poll_interval: float = 0.5):
             is_active, _calc = firebase_uploader.get_control_flags_for_ride(USER_ID, ride_id)
             if is_active:
                 current_is_active = True
+                print("--------------------------------------------")
                 print("Ride activated. Beginning logging.")
+                print("--------------------------------------------")
                 break
         except Exception:
             pass
@@ -346,10 +352,10 @@ def main():
     # Initialize shared memory writer for warning system
     try:
         shm_writer = shared_memory_bridge.SensorDataWriter(create_new=True)
-        print("✓ Shared memory bridge initialized for warning system")
+        print("Shared memory bridge initialized for warning system")
     except Exception as e:
-        print(f"⚠ Shared memory init failed: {e}")
-        print("  Warning system will not receive data")
+        print(f"Shared memory init failed: {e}")
+        print("Warning system will not receive data")
         shm_writer = None
 
     # Initialize and Authenticate Firebase
@@ -417,7 +423,9 @@ def main():
         except:
             pass
 
-        print(f"Logging at {TARGET_HZ} Hz to {csv_filename}. Press Ctrl+C to stop.")
+        print("--------------------------------------------")
+        print(f"Logging at {TARGET_HZ} Hz to {csv_filename}.")
+        print("--------------------------------------------")
         next_sample_time = time.perf_counter()
         last_fb_push = 0.0
         sample_count = 0
@@ -430,7 +438,9 @@ def main():
         if shm_writer is not None:
             ride_id_num = int(ride_id) if ride_id.isdigit() else 0
             shm_writer.set_ride_active(ride_id_num)
-            print(f"� Ride {ride_id} activated in shared memory")
+            print("--------------------------------------------")
+            print(f"Ride {ride_id} activated in shared memory")
+            print("--------------------------------------------")
             time.sleep(0.1)  # Give Warning_Generate.py time to detect
         
         # Pre-allocate variables to avoid lookups
@@ -470,12 +480,16 @@ def main():
                 # Check if ride is still active (control poll thread updates this)
                 if not current_is_active:
                     # Ride has ended - wait for queue to drain, then upload
-                    print(f"\nRide {ride_id} ended. Flushing data...")
+                    print("--------------------------------------------")
+                    print(f"Ride {ride_id} ended. Flushing data...")
+                    print("--------------------------------------------")
                     
                     # Set ride inactive flag in shared memory
                     if shm_writer is not None:
                         shm_writer.set_ride_inactive()
-                        print("� Ride deactivated in shared memory")
+                        print("--------------------------------------------")
+                        print("Ride deactivated in shared memory")
+                        print("--------------------------------------------")
                     
                     # Wait for CSV queue to empty (with timeout)
                     timeout = time.time() + 5.0
@@ -491,7 +505,9 @@ def main():
                             USER_ID, ride_id, f'warnings_{ride_id}.csv'
                         )
                         if upload_success:
+                            print("--------------------------------------------")
                             print(f"Raw data successfully uploaded for ride {ride_id}")
+                            print("--------------------------------------------")
                         else:
                             print(f"Failed to upload raw data for ride {ride_id}")
                     except Exception as e:
@@ -535,14 +551,14 @@ def main():
                 sample_count += 1
                 
                 # Queue console output much less frequently (1 Hz at 100 Hz sampling)
-                if sample_count % print_interval == 0:
-                    readable_ts = datetime.fromtimestamp(timestamp_ms / 1000.0).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
-                    msg = (f"[{sample_count}] Time={readable_ts} Acc=({mpu[0]:.4f},{mpu[1]:.4f},{mpu[2]:.4f}) "
-                           f"Speed={spd:.2f} km/h Src={speed_source}")
-                    try:
-                        print_queue.put_nowait(msg)
-                    except:
-                        pass
+                # if sample_count % print_interval == 0:
+                #     readable_ts = datetime.fromtimestamp(timestamp_ms / 1000.0).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+                #     msg = (f"[{sample_count}] Time={readable_ts} Acc=({mpu[0]:.4f},{mpu[1]:.4f},{mpu[2]:.4f}) "
+                #            f"Speed={spd:.2f} km/h Src={speed_source}")
+                #     try:
+                #         print_queue.put_nowait(msg)
+                #     except:
+                #         pass
                 
                 # Note: Firebase push logic moved to Warning_Generate.py
 
@@ -564,9 +580,9 @@ def main():
     if shm_writer:
         try:
             shm_writer.cleanup()
-            print("✓ Shared memory cleaned up")
+            print("Shared memory cleaned up")
         except Exception as e:
-            print(f"⚠ Shared memory cleanup warning: {e}")
+            print(f"Shared memory cleanup warning: {e}")
     
     print("Log complete.")
             

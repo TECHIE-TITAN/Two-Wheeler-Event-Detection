@@ -31,7 +31,9 @@ def _sign_in_email_password():
     _REFRESH_TOKEN = js.get('refreshToken')
     expires_in = int(js.get('expiresIn', '3600'))
     _TOKEN_EXPIRY_EPOCH = time.time() + expires_in
+    print("--------------------------------------------")
     print("Signed in to Firebase.")
+    print("--------------------------------------------")
 
 
 def _refresh_token():

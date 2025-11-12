@@ -26,7 +26,7 @@ class CameraManager:
             cv2.imwrite(filepath, bgr_image)
             return filepath, timestamp_ms
         except Exception as e:
-            print(f"Camera capture error: {e}")
+            # print(f"Camera capture error: {e}")
             return None, None
 
     def close(self):
@@ -70,7 +70,8 @@ if __name__ == '__main__':
                 image_count += 1
                 filepath = capture_image(cam_manager)
                 if filepath:
-                    print(f"  [Image {image_count}] saved to: {filepath}")
+                    # print(f"  [Image {image_count}] saved to: {filepath}")
+                    pass
                 else:
                     print(f"  [Image {image_count}] Failed to capture.")
                 time.sleep(2)  # Wait 2 seconds between captures

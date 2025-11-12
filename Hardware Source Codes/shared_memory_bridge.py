@@ -103,14 +103,14 @@ class SensorDataWriter:
                 self.flag_array[0] = 0  # ride_active = 0 (inactive)
                 self.flag_array[1] = 0  # ride_id = 0
             
-            print(f"✓ Writer initialized: {SHARED_MEMORY_SIZE} bytes data + {RIDE_FLAG_SIZE} bytes flag")
+            # print(f"Writer initialized: {SHARED_MEMORY_SIZE} bytes data + {RIDE_FLAG_SIZE} bytes flag")
             
         except FileExistsError:
-            print("⚠ Shared memory already exists. Cleaning up and recreating...")
+            # print("Shared memory already exists. Cleaning up and recreating...")
             self.cleanup()
             self.__init__(create_new=True)
         except Exception as e:
-            print(f"✗ Writer initialization error: {e}")
+            # print(f"Writer initialization error: {e}")
             raise
     
     def write_batch(self, batch_data):
