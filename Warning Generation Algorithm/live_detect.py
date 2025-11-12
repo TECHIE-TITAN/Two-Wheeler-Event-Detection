@@ -6,21 +6,15 @@ import cv2 # Still needed for font/color definitions
 
 # --- 1. Define Your Variables ---
 API_KEY = "rRFoNCvmMJDVJrriVS1o"
-POTHOLE_MODEL_ID = "pothole-xjwqu/3"
-SPEEDBUMP_MODEL_ID = "speedbump-tkb8k/9"
+MODEL_ID = "potholes-and-speed-bumps-detection/1" # Your new single model
 
-# --- 2. Load BOTH Models ---
-print(f"Loading pothole model: {POTHOLE_MODEL_ID}...")
-pothole_model = get_model(model_id=POTHOLE_MODEL_ID, api_key=API_KEY)
-
-print(f"Loading speedbump model: {SPEEDBUMP_MODEL_ID}...")
-speedbump_model = get_model(model_id=SPEEDBUMP_MODEL_ID, api_key=API_KEY)
+# --- 2. Load the SINGLE Model ---
+print(f"Loading combined model: {MODEL_ID}...")
+model = get_model(model_id=MODEL_ID, api_key=API_KEY)
 
 # --- 3. Set up Pi Camera (picamera2) ---
 print("Configuring Pi Camera...")
 picam2 = Picamera2()
-
-# *** THIS IS YOUR FIX ***
 # Set a very low resolution for fast processing
 config = picam2.create_preview_configuration(main={"size": (320, 240)})
 picam2.configure(config)
@@ -29,36 +23,39 @@ picam2.start()
 print("--- Starting Live Detection ---")
 print("Press Ctrl+C in the terminal to quit.")
 
-# --- 4. Start the Live Loop ---
-frame_counter = 0 # <-- We need this to alternate
+# --- 4. Start the Simplified Live Loop ---
 try:
     while True:
         start_time = time.time()
-        frame_counter += 1
         
         # Read a new frame
         frame = picam2.capture_array()
         frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
-        # --- 5. Run inference on ONLY ONE model per frame ---
+        # --- 5. Run ONE inference call for ALL objects ---
+        results = model.infer(frame_bgr)[0]
+        detections = sv.Detections.from_inference(results)
+
+        # --- 6. This is your "Return Statement" logic ---
+        potholes_found = False
+        speedbumps_found = False
+
+        # Loop through all detections in this frame
+        if len(detections) > 0:
+            for class_name in detections.data['class_name']:
+                if 'pothole' in class_name.lower(): # Use .lower() to be safe
+                    potholes_found = True
+                if 'speed' in class_name.lower(): # 'speed' will catch "Speed-Bump"
+                    speedbumps_found = True
+
+        # Now print the results for this frame
+        if potholes_found:
+            print("POTHOLE DETECTED!")
         
-        if frame_counter % 2 == 0:
-            # On even frames, check for potholes
-            #print("Checking for POTHOLE...")
-            results = pothole_model.infer(frame_bgr)[0]
-            detections = sv.Detections.from_inference(results)
-            if len(detections) > 0:
-                print("POTHOLE DETECTED!")
-            
-        else:
-            # On odd frames, check for speedbumps
-            #print("Checking for SPEEDBUMP...")
-            results = speedbump_model.infer(frame_bgr)[0]
-            detections = sv.Detections.from_inference(results)
-            if len(detections) > 0:
-                print("SPEEDBUMP DETECTED!")
+        if speedbumps_found:
+            print("SPEEDBUMP DETECTED!")
         
-        if len(detections) == 0:
+        if not potholes_found and not speedbumps_found:
             print("Clear")
 
         # Calculate and print FPS
