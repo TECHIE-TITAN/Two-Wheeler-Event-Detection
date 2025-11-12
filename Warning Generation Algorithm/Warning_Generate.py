@@ -123,9 +123,9 @@ def infer_model_config_from_weights(weights_path):
         if n_classes_candidates:
             n_classes = min(n_classes_candidates)
     
-    # Fallbacks
+    # Fallbacks (based on actual model architecture)
     if lstm_units is None:
-        lstm_units = 100
+        lstm_units = 70  # Updated from 100 to match saved weights
     if dense_intermediate is None:
         dense_intermediate = 10
     if n_classes is None:
