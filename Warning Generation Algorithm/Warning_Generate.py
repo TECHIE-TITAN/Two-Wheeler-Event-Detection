@@ -808,21 +808,29 @@ def main():
     try:
         batch_counter = 0
         while True:
-            # Wait for data to be available
-            if len(get_current_data_batch()) < BATCH_SIZE:
-                print("⏳ Waiting for first batch from main2.py...")
+            # Check if ride is active
+            if shm_reader is None or not shm_reader.is_ride_active():
+                # No active ride - wait
+                if batch_counter > 0:
+                    print(f"\n⏳ Ride ended. Waiting for next ride to start...")
+                    batch_counter = 0
                 time.sleep(1.0)
+                continue
+            
+            # Wait for data to be available
+            batch = get_current_data_batch()
+            if len(batch) < BATCH_SIZE:
+                time.sleep(0.1)
                 continue
             
             batch_counter += 1
             
             # Get current batch, warnings, and LSTM prediction
-            current_batch = get_current_data_batch()
             warnings = get_warnings()
             lstm_pred = get_lstm_prediction()
             
             # Write batch to CSV
-            write_batch_to_csv(current_batch, lstm_pred, warnings)
+            write_batch_to_csv(batch, lstm_pred, warnings)
             
             warning_names = [
                 "Overspeeding", "Bump", "Pothole",
