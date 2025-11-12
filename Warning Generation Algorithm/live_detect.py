@@ -7,7 +7,7 @@ import cv2 # Still needed for font/color definitions
 # --- 1. Define Your Variables ---
 API_KEY = "rRFoNCvmMJDVJrriVS1o"
 POTHOLE_MODEL_ID = "pothole-xjwqu/3"
-SPEEDBUMP_MODEL_ID = "speed-bumps-detection-61eef/7"
+SPEEDBUMP_MODEL_ID = "speedbump-tkb8k/9"
 
 # --- 2. Load BOTH Models ---
 print(f"Loading pothole model: {POTHOLE_MODEL_ID}...")
