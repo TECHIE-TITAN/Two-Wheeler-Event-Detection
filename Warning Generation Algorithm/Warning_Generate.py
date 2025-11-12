@@ -36,6 +36,8 @@ class SensorData:
 BATCH_SIZE = 104
 current_data_batch: List[SensorData] = []
 data_lock = threading.Lock()
+last_batch_id = 0  # Track which batch we've processed
+batch_id_lock = threading.Lock()
 
 # Shared memory reader for receiving data from main2.py
 shm_reader = None
@@ -529,7 +531,7 @@ def update_sensor_data_batch(new_batch: List[SensorData]):
 
 def shared_memory_reader_thread():
     """Thread to continuously read batches from shared memory and update current_data_batch"""
-    global shm_reader, shm_read_thread_active, current_data_batch, current_ride_id, CSV_FILENAME
+    global shm_reader, shm_read_thread_active, current_data_batch, current_ride_id, CSV_FILENAME, last_batch_id
     
     print("⏳ Shared memory reader thread starting...")
     
@@ -576,9 +578,10 @@ def shared_memory_reader_thread():
             
             # Ride is active - check if it's a new ride
             ride_id = shm_reader.get_ride_id()
+            # Compare as integers to avoid string vs int mismatch
             if current_ride_id != ride_id:
                 # New ride started
-                current_ride_id = str(ride_id)
+                current_ride_id = ride_id  # Store as int
                 CSV_FILENAME = f"warnings_{ride_id}.csv"
                 print("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
                 print(f"New ride started: ride_id={ride_id}")
@@ -619,18 +622,13 @@ def shared_memory_reader_thread():
                     )
                     new_batch.append(sensor_point)
                 
-                # Update global batch
+                # Update global batch and increment batch ID
                 with data_lock:
                     current_data_batch = new_batch
+                with batch_id_lock:
+                    last_batch_id += 1
                 
                 read_count += 1
-                
-                # Print stats every 10 batches
-                # if read_count % 10 == 0:
-                #     elapsed = time.time() - last_read_time
-                #     rate = 10 / elapsed if elapsed > 0 else 0
-                #     print(f"📊 Received {read_count} batches (rate: {rate:.1f} batches/s)")
-                #     last_read_time = time.time()
             
             # Small sleep to avoid spinning (shared memory is always available)
             time.sleep(0.01)  # 100 Hz polling rate
@@ -822,6 +820,8 @@ def main():
     # Monitor warnings
     try:
         batch_counter = 0
+        processed_batch_id = 0  # Track which batch we've already processed
+        
         while True:
             # Check if ride is active
             if shm_reader is None or not shm_reader.is_ride_active():
@@ -831,16 +831,27 @@ def main():
                     print(f"Ride ended. Waiting for next ride to start...")
                     print("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
                     batch_counter = 0
+                    processed_batch_id = 0  # Reset for next ride
                 time.sleep(1.0)
                 continue
             
-            # Wait for data to be available
+            # Check if we have a new batch to process
+            with batch_id_lock:
+                current_batch_id = last_batch_id
+            
+            if current_batch_id == processed_batch_id:
+                # No new batch yet, wait
+                time.sleep(0.1)
+                continue
+            
+            # We have a new batch - process it
             batch = get_current_data_batch()
             if len(batch) < BATCH_SIZE:
                 time.sleep(0.1)
                 continue
             
             batch_counter += 1
+            processed_batch_id = current_batch_id
             
             # Get current batch, warnings, and LSTM prediction
             warnings = get_warnings()
@@ -864,8 +875,6 @@ def main():
                 print(f"  No warnings")
             print(f"  Written to {CSV_FILENAME}")
             print("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
-            
-            time.sleep(1.0)  # Display update rate (1 Hz)
             
     except KeyboardInterrupt:
         print("\n\nShutting down warning system...")
