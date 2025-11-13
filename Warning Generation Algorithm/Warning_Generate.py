@@ -74,15 +74,15 @@ lstm_prediction_lock = threading.Lock()
 
 # LSTM model initialization
 lstm_model = None
-WEIGHTS_PATH = os.path.join(os.path.dirname(__file__), 'lstm_model_weights.weights.h5')
+WEIGHTS_PATH = os.path.join(os.path.dirname(__file__), 'lstm_model_weights_with_class_weights89.weights.h5')
 
-def build_lstm_model(input_shape, n_classes, lstm_units=100, dense_intermediate=10):
-    """Build LSTM model architecture matching the weights file"""
+def build_lstm_model(input_shape, n_classes, lstm_units=100, dense_intermediate=30):
+    """Build LSTM model architecture matching the weights file (6 features: no speed)"""
     model = Sequential()
     model.add(Input(shape=input_shape))
     model.add(LSTM(units=lstm_units))
-    model.add(Dropout(0.5))
-    model.add(Dense(units=dense_intermediate, activation='relu'))
+    model.add(Dropout(0.3))
+    model.add(Dense(units=dense_intermediate, activation='tanh'))
     model.add(Dense(n_classes, activation='softmax'))
     model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
     return model
@@ -103,7 +103,7 @@ def infer_model_config_from_weights(weights_path):
                     if 'kernel' in lname:
                         shape = obj.shape
                         if len(shape) == 2:
-                            # Detect LSTM kernel by expecting input_dim=7 and 4*units columns
+                            # Detect LSTM kernel by expecting input_dim=6 (no speed) and 4*units columns
                             if 'lstm' in lname and shape[1] % 4 == 0:
                                 lstm_units = shape[1] // 4
                             # Collect dense kernels for later analysis
@@ -127,9 +127,9 @@ def infer_model_config_from_weights(weights_path):
     
     # Fallbacks (based on actual model architecture)
     if lstm_units is None:
-        lstm_units = 70  # Updated from 100 to match saved weights
+        lstm_units = 100  # Match new weights (6 features, no speed)
     if dense_intermediate is None:
-        dense_intermediate = 10
+        dense_intermediate = 30
     if n_classes is None:
         n_classes = 5
     
@@ -148,9 +148,9 @@ def load_lstm_model():
         lstm_units, n_classes, dense_intermediate = infer_model_config_from_weights(WEIGHTS_PATH)
         print(f"Inferred model config: lstm_units={lstm_units}, n_classes={n_classes}, dense_intermediate={dense_intermediate}")
         
-        # Build model with correct architecture
+        # Build model with correct architecture (6 features: no speed)
         model = build_lstm_model(
-            input_shape=(BATCH_SIZE, 7),
+            input_shape=(BATCH_SIZE, 6),
             n_classes=n_classes,
             lstm_units=lstm_units,
             dense_intermediate=dense_intermediate
@@ -174,7 +174,7 @@ def load_lstm_model():
                 try:
                     a = int(a_str)
                     b = int(b_str)
-                    if b % 4 == 0 and a == 7:  # Expect input_dim=7 features
+                    if b % 4 == 0 and a == 6:  # Expect input_dim=6 features (no speed)
                         inferred_units = b // 4
                         break
                 except Exception:
@@ -183,7 +183,7 @@ def load_lstm_model():
             if inferred_units is not None and inferred_units != lstm_units:
                 print(f'Rebuilding with lstm_units={inferred_units} based on error parsing...')
                 model = build_lstm_model(
-                    input_shape=(BATCH_SIZE, 7),
+                    input_shape=(BATCH_SIZE, 6),
                     n_classes=n_classes,
                     lstm_units=inferred_units,
                     dense_intermediate=dense_intermediate
@@ -280,20 +280,19 @@ def lstm_prediction_thread():
             
             features = extract_batch_features(batch)
             
-            # Prepare input for LSTM (104 timesteps, 7 features)
-            # Match the exact order used in training: acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z, speed
+            # Prepare input for LSTM (104 timesteps, 6 features - NO SPEED)
+            # Match the exact order used in training: acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z
             input_sequence = np.stack([
                 features['accel_x'],
                 features['accel_y'],
                 features['accel_z'],
                 features['angular_x'],
                 features['angular_y'],
-                features['angular_z'],
-                features['speed']
+                features['angular_z']
             ], axis=1)
             
-            # Reshape to (1, 104, 7) for batch prediction
-            input_sequence = input_sequence.reshape(1, BATCH_SIZE, 7).astype(np.float32)
+            # Reshape to (1, 104, 6) for batch prediction
+            input_sequence = input_sequence.reshape(1, BATCH_SIZE, 6).astype(np.float32)
             
             # Check for NaNs in input
             if np.isnan(input_sequence).any():
