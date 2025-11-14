@@ -13,6 +13,11 @@ from tensorflow import keras
 from keras.models import Sequential
 from keras.layers import LSTM, Dense, Dropout, Input
 
+# --- MODIFICATION: Add new imports for file reading ---
+import json 
+# --- END MODIFICATION ---
+
+
 # Add Hardware Source Codes to path for shared_memory_bridge import
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'Hardware Source Codes'))
 import shared_memory_bridge  # type: ignore
@@ -76,6 +81,12 @@ lstm_prediction_lock = threading.Lock()
 lstm_model = None
 WEIGHTS_PATH = os.path.join(os.path.dirname(__file__), 'lstm_model_weights_with_class_weights89.weights.h5')
 
+# --- MODIFICATION: Add path to the shared warning file ---
+CAMERA_WARNING_FILE = "camera_warnings.json"
+# --- END MODIFICATION ---
+
+# (build_lstm_model, infer_model_config_from_weights, load_lstm_model... all remain unchanged)
+# ... [No changes to these functions] ...
 def build_lstm_model(input_shape, n_classes, lstm_units=100, dense_intermediate=30):
     """Build LSTM model architecture matching the weights file (6 features: no speed)"""
     model = Sequential()
@@ -209,7 +220,7 @@ except Exception as e:
 SPEEDY_TURN_THRESHOLD = 0.5  # rad/s (Z-axis angular velocity for yaw/turning)
 HARSH_BRAKE_THRESHOLD = -4.0  # m/s^2
 SUDDEN_ACCEL_THRESHOLD = 3.5  # m/s^2
-POTHOLE_Z_THRESHOLD = 2.5  # m/s^2 vertical acceleration spike
+# POTHOLE_Z_THRESHOLD = 2.5  # m/s^2 vertical acceleration spike (No longer needed)
 
 
 def update_warning(index: int, value: int):
@@ -259,13 +270,16 @@ def lstm_prediction_thread():
     """Thread for LSTM model predictions using 104 data points
     
     Model outputs 5 classes in alphabetical order: [BUMP, LEFT, RIGHT, STOP, STRAIGHT]
-    Returns a single prediction per batch of 104 points.
+    
+    --- MODIFICATION ---
+    This thread NO LONGER controls the "Bump" warning (index 1).
+    It ONLY provides the event prediction (LEFT, RIGHT, etc.)
+    for the speedy_turns_thread and for logging.
     """
     global lstm_model
     
     # Class names from model (alphabetical order from get_dummies)
     CLASS_NAMES = ['BUMP', 'LEFT', 'RIGHT', 'STOP', 'STRAIGHT']
-    BUMP_CONFIDENCE_THRESHOLD = 0.6  # Minimum confidence to trigger bump warning
     
     while True:
         try:
@@ -281,7 +295,6 @@ def lstm_prediction_thread():
             features = extract_batch_features(batch)
             
             # Prepare input for LSTM (104 timesteps, 6 features - NO SPEED)
-            # Match the exact order used in training: acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z
             input_sequence = np.stack([
                 features['accel_x'],
                 features['accel_y'],
@@ -303,22 +316,15 @@ def lstm_prediction_thread():
             # Predict: [BUMP, LEFT, RIGHT, STOP, STRAIGHT]
             prediction = lstm_model.predict(input_sequence, verbose=0)
             pred_class_idx = np.argmax(prediction[0])
-            confidence = prediction[0][pred_class_idx]
             predicted_label = CLASS_NAMES[pred_class_idx] if pred_class_idx < len(CLASS_NAMES) else str(pred_class_idx)
             
             # Update global LSTM prediction for output
             update_lstm_prediction(predicted_label)
             
-            # BUMP is index 0 in alphabetical order
-            bump_idx = CLASS_NAMES.index('BUMP') if 'BUMP' in CLASS_NAMES else 0
-            
-            # Update bump warning based on prediction and confidence
-            if pred_class_idx == bump_idx and confidence >= BUMP_CONFIDENCE_THRESHOLD:
-                update_warning(1, 1)  # Bump detected
-            else:
-                update_warning(1, 0)  # No bump
-            
-            # Note: Debug print removed - prediction is displayed in main loop
+            # --- MODIFICATION ---
+            # We NO LONGER update the bump warning from here.
+            # The camera_warning_reader_thread is now responsible for index 1.
+            # --- END MODIFICATION ---
             
             time.sleep(0.05)
             
@@ -330,11 +336,7 @@ def lstm_prediction_thread():
 
 
 def overspeeding_thread():
-    """Thread for overspeeding detection using batch data
-    
-    Checks if current speed exceeds the posted speed limit directly.
-    No buffer is used - any speed over the limit is considered overspeeding.
-    """
+    """Thread for overspeeding detection using batch data"""
     while True:
         try:
             batch = get_current_data_batch()
@@ -360,16 +362,7 @@ def overspeeding_thread():
 
 
 def speedy_turns_thread():
-    """Thread for detecting speedy/sharp turns using batch data
-    
-    For a scooter/two-wheeler:
-    - Z-axis (vertical) represents yaw rotation (turning left/right)
-    - X-axis represents pitch (front-back tilt)
-    - Y-axis represents roll (side-to-side tilt)
-    
-    We only monitor Z-axis angular velocity for turn detection.
-    ONLY checks if turn is speedy when LSTM predicts LEFT or RIGHT event.
-    """
+    """Thread for detecting speedy/sharp turns using batch data"""
     while True:
         try:
             batch = get_current_data_batch()
@@ -408,33 +401,71 @@ def speedy_turns_thread():
             time.sleep(0.1)
 
 
-def pothole_detection_thread():
-    """Thread for pothole detection using vertical acceleration spikes"""
-    while True:
+# --- MODIFICATION: This thread is REPLACED ---
+def camera_warning_reader_thread():
+    """
+    Thread to read pothole/bump warnings from the shared JSON file
+    created by live_detect_updated.py.
+    
+    This replaces the old pothole_detection_thread.
+    """
+    print("✓ Camera Warning Reader thread started.")
+    
+    # These store the last *seen* value.
+    # The camera script alternates, so we need to remember the last value
+    # for the *other* detection.
+    last_pothole_val = 0
+    last_bump_val = 0
+
+    while shm_read_thread_active:
         try:
-            batch = get_current_data_batch()
-            if len(batch) < BATCH_SIZE:
-                time.sleep(0.1)
+            # Check if the warning file exists
+            if not os.path.exists(CAMERA_WARNING_FILE):
+                # File not created yet, wait
+                time.sleep(1.0)
                 continue
             
-            features = extract_batch_features(batch)
+            # Read the shared JSON file
+            with open(CAMERA_WARNING_FILE, 'r') as f:
+                data = json.load(f)
+                
+            pothole_val = data.get("pothole", 0)
+            bump_val = data.get("bump", 0)
+            last_seen = data.get("timestamp", 0)
+
+            # Check if the file is stale (e.g., camera script crashed)
+            if (time.time() - last_seen) > 3.0:
+                print("⚠ Warning: Camera detection data is stale. Setting warnings to 0.")
+                pothole_val = 0
+                bump_val = 0
             
-            # Detect sudden vertical acceleration changes (pothole signature)
-            z_accel = features['accel_z']
+            # The camera script alternates, so one of these will be 0.
+            # We must update our state based on the *non-zero* value,
+            # while remembering the last value of the *other* one.
             
-            # Look for sharp negative spikes in vertical acceleration
-            pothole_detected = np.any(np.abs(z_accel - 9.8) > POTHOLE_Z_THRESHOLD)
+            if pothole_val == 1:
+                last_pothole_val = 1
+            elif bump_val == 0: # Only clear pothole if this was a pothole frame
+                last_pothole_val = 0
+                
+            if bump_val == 1:
+                last_bump_val = 1
+            elif pothole_val == 0: # Only clear bump if this was a bump frame
+                last_bump_val = 0
+
+            # Update the global warning state
+            update_warning(2, last_pothole_val) # Index 2 = Pothole
+            update_warning(1, last_bump_val) # Index 1 = Bump
             
-            if pothole_detected:
-                update_warning(2, 1)
-            else:
-                update_warning(2, 0)
+            time.sleep(0.1) # Poll 10x per second
             
-            time.sleep(0.05)
-            
+        except json.JSONDecodeError:
+            # This can happen if we read the file *while* it's being written
+            time.sleep(0.05) # Just wait and try again
         except Exception as e:
-            print(f"Pothole thread error: {e}")
-            time.sleep(0.1)
+            print(f"Camera warning reader error: {e}")
+            time.sleep(1.0)
+# --- END MODIFICATION ---
 
 
 def harsh_braking_thread():
@@ -520,7 +551,8 @@ def sudden_acceleration_thread():
             print(f"Sudden acceleration thread error: {e}")
             time.sleep(0.1)
 
-
+# (shared_memory_reader_thread, get_warnings, write_batch_to_csv, firebase_push_thread... all remain unchanged)
+# ... [No changes to these functions] ...
 def update_sensor_data_batch(new_batch: List[SensorData]):
     """Update global sensor data batch (called by data acquisition system)"""
     global current_data_batch
@@ -777,16 +809,21 @@ def firebase_push_thread():
 
 def start_warning_system():
     """Initialize and start all monitoring threads"""
+    
+    # --- MODIFICATION: Updated thread list ---
     threads = [
         threading.Thread(target=shared_memory_reader_thread, daemon=True, name="SharedMemReader"),
         threading.Thread(target=lstm_prediction_thread, daemon=True, name="LSTM"),
         threading.Thread(target=overspeeding_thread, daemon=True, name="Overspeeding"),
-        threading.Thread(target=pothole_detection_thread, daemon=True, name="Pothole"),
+        threading.Thread(target=camera_warning_reader_thread, daemon=True, name="CameraWarningReader"), # <-- Replaced
         threading.Thread(target=speedy_turns_thread, daemon=True, name="SpeedyTurns"),
         threading.Thread(target=harsh_braking_thread, daemon=True, name="HarshBraking"),
         threading.Thread(target=sudden_acceleration_thread, daemon=True, name="SuddenAccel"),
         threading.Thread(target=firebase_push_thread, daemon=True, name="FirebasePush")
+        # Note: We do NOT add the camera_detection_thread here, as it runs as a separate script
     ]
+    # --- END MODIFICATION ---
+    
     print("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
     print("Starting warning generation system...")
     # print(f"Batch size: {BATCH_SIZE} data points")
@@ -800,7 +837,8 @@ def start_warning_system():
     return threads
 
 
-# Example usage
+# (main function remains unchanged)
+# ... [No changes to main] ...
 def main():
     """
     Main function - now receives data from main2.py via shared memory
