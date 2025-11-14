@@ -62,13 +62,14 @@ def _current_auth_token() -> str:
     return _ID_TOKEN  # type: ignore
 
 
-def update_rider_speed(user_id: str, speed: float, speed_limit: float, warnings: Optional[Dict[str, dict]] = None) -> bool:
+def update_rider_speed(user_id: str, speed: float, speed_limit: float, lstm_pred: str, warnings: Optional[Dict[str, dict]] = None) -> bool:
     # Write to new schema: users/{uid}/rider_data with keys: speed, speed_limit, active_warnings
     url = f"{DB_URL}/users/{user_id}/rider_data.json?auth={_current_auth_token()}"
     payload = {
         "speed": speed,
         "speed_limit": speed_limit,
-        "active_warnings": warnings or {}
+        "active_warnings": warnings or {},
+        "inference": lstm_pred
     }
     try:
         response = requests.patch(url, json=payload, timeout=5)

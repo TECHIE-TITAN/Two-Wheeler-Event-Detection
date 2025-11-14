@@ -21,6 +21,7 @@ import json
 # Add Hardware Source Codes to path for shared_memory_bridge import
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'Hardware Source Codes'))
 import shared_memory_bridge  # type: ignore
+import firebase_uploader  # type: ignore
 
 # Global data structure
 @dataclass
@@ -54,20 +55,14 @@ CSV_FILENAME = "warnings.csv"  # Will be updated to warnings_{ride_id}.csv when 
 csv_lock = threading.Lock()
 
 # Firebase integration
-firebase_uploader = None
 USER_ID = "OYFNMBRHiPduTdplwnSIa2dxdwx1"
 FIREBASE_PUSH_INTERVAL_S = 7.0
 last_firebase_push = 0.0
 
-# Import firebase_uploader from Hardware Source Codes
-try:
-    import firebase_uploader  # type: ignore
-    print("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
-    print("✓ Firebase uploader imported")
-    print("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
-except Exception as e:
-    print(f"⚠ Firebase uploader import failed: {e}")
-    firebase_uploader = None
+# firebase_uploader is already imported above
+print("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+print("✓ Firebase uploader imported")
+print("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
 
 # Warning tuple: [overspeeding, bump, pothole, speedy_turns, harsh_braking, sudden_accel]
 warning_state = [0, 0, 0, 0, 0, 0]
@@ -741,11 +736,7 @@ def firebase_push_thread():
     """
     global last_firebase_push
     
-    if firebase_uploader is None:
-        print("⚠ Firebase uploader not available, skipping Firebase push thread")
-        return
-    
-    # print("Firebase push thread started")
+    print("✓ Firebase push thread started")
     
     while shm_read_thread_active:
         try:
@@ -780,20 +771,25 @@ def firebase_push_thread():
             
             # Push speed data with warnings and events (LSTM prediction)
             try:
-                # Build warnings list for Firebase
-                fb_warnings = active_warnings if active_warnings else []
+                # Build warnings dictionary for Firebase (expected format: Dict[str, dict])
+                fb_warnings = {}
+                if active_warnings:
+                    timestamp_ms = int(time.time() * 1000)
+                    for idx, warning_name in enumerate(active_warnings):
+                        fb_warnings[f"warning_{timestamp_ms + idx}"] = {
+                            "type": warning_name.lower().replace(" ", "_"),
+                            "message": warning_name,
+                            "timestamp": timestamp_ms + idx
+                        }
                 
-                # Push: speed, speed_limit, warnings list
+                # Push: speed, speed_limit, lstm_pred, warnings dict
                 firebase_uploader.update_rider_speed(
                     USER_ID,
                     latest.speed,
                     latest.speed_limit,
+                    lstm_pred,
                     fb_warnings
                 )
-                
-                # Note: LSTM prediction (events) is included as part of warnings
-                # If you have a separate method to push events, use it here:
-                # firebase_uploader.update_rider_events(USER_ID, lstm_pred)
                 
             except Exception as e:
                 print(f"Firebase push error: {e}")
