@@ -63,27 +63,39 @@ batch_buffer = []  # Accumulate 104 points before writing to shared memory
 batch_buffer_lock = threading.Lock()
 
 def calculate_speed_from_accel():
-    """Update and return speed using latest acceleration and time since last calculation.
-    Updates last_speed_calc_ts internally. Returns speed in m/s.
+    """Integrate x-axis acceleration to estimate forward speed (m/s).
+    - Uses latest `last_accel_ms2` (x-axis) and high-res dt from perf_counter.
+    - Applies small deadband and drift suppression; clamps to non-negative.
+    Returns current speed estimate in m/s.
     """
     global current_speed_ms, last_accel_ms2, last_speed_calc_ts, last_accel_decimals
     with speed_calculation_lock:
         now = time.perf_counter()
-        # If we don't have a previous timestamp, initialize it
+        # Initialize anchor on first call
         if last_speed_calc_ts is None:
             last_speed_calc_ts = now
             return current_speed_ms
-        
+
         dt = max(0.0, now - last_speed_calc_ts)
         last_speed_calc_ts = now  # Update anchor
-        
-        # Deadband to suppress noise
+
+        # Deadband to suppress noise (m/s^2)
         accel = last_accel_ms2 if abs(last_accel_ms2) >= 0.2 else 0.0
-        
-        # Integrate acceleration
+
+        # Integrate acceleration (v = ∫a dt)
         current_speed_ms += accel * dt
+
+        # Clamp to non-negative and suppress tiny drift
         if current_speed_ms < 0.0:
             current_speed_ms = 0.0
+        elif abs(accel) < 0.05 and current_speed_ms < 0.05:
+            # When nearly no accel and speed tiny, snap to zero
+            current_speed_ms = 0.0
+
+        # Optional hard cap to reject outliers (~300 km/h)
+        if current_speed_ms > 83.3333:
+            current_speed_ms = 83.3333
+
         # current_speed_ms = round(current_speed_ms, last_accel_decimals)
         return current_speed_ms
 
@@ -94,15 +106,23 @@ def mpu_thread():
         with data_lock:
             latest_mpu = data
         # Update latest acceleration and precision directly (no buffer)
+        updated_accel = False
         if data and len(data) >= 1 and data[0] is not None:
             with speed_calculation_lock:
                 acc_x = data[0]
+                # Convert from g to m/s^2 if MPU returns g-units
                 last_accel_ms2 = acc_x * 9.81
                 raw_str = f"{acc_x:.10f}".rstrip('0').rstrip('.')
                 if '.' in raw_str:
                     decs = len(raw_str.split('.')[1])
                     if decs > 0:
                         last_accel_decimals = min(decs, 10)
+            updated_accel = True
+
+        # Integrate at sensor rate for smoother fallback speed
+        if updated_accel:
+            calculate_speed_from_accel()
+
         time.sleep(0.001)
 
 def gps_thread(gps_serial):
@@ -120,9 +140,16 @@ def gps_thread(gps_serial):
                 
                 # Check if GPS speed is valid
                 if gps_speed is not None and 0 <= gps_speed <= 300:
-                    # Valid GPS speed - use it directly
+                    # Valid GPS speed - use it directly and anchor integrator
                     final_speed = gps_speed
                     speed_src = "GPS"
+                    try:
+                        with speed_calculation_lock:
+                            # Anchor integrator to GPS speed (m/s) and reset time anchor
+                            current_speed_ms = max(0.0, min(83.3333, gps_speed / 3.6))
+                            last_speed_calc_ts = time.perf_counter()
+                    except Exception:
+                        pass
                 else:
                     # GPS speed unavailable or invalid - use accelerometer fallback
                     accel_speed_ms = calculate_speed_from_accel()
@@ -442,6 +469,11 @@ def main():
             print(f"Ride {ride_id} activated in shared memory")
             print("--------------------------------------------")
             time.sleep(0.1)  # Give Warning_Generate.py time to detect
+
+        # Reset speed integrator at the start of each ride
+        with speed_calculation_lock:
+            current_speed_ms = 0.0
+            last_speed_calc_ts = None
         
         # Pre-allocate variables to avoid lookups
         sample_interval = SAMPLE_INTERVAL
