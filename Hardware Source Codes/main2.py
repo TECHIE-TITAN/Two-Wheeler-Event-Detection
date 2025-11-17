@@ -85,16 +85,13 @@ def calculate_speed_from_accel():
         # Integrate acceleration (v = ∫a dt)
         current_speed_ms += accel * dt
 
-        # Clamp to non-negative and suppress tiny drift
-        if current_speed_ms < 0.0:
-            current_speed_ms = 0.0
-        elif abs(accel) < 0.05 and current_speed_ms < 0.05:
-            # When nearly no accel and speed tiny, snap to zero
-            current_speed_ms = 0.0
+        # # Clamp to non-negative and suppress tiny drift
+        # if current_speed_ms < 0.0:
+        #     current_speed_ms = 0.0
 
-        # Optional hard cap to reject outliers (~300 km/h)
-        if current_speed_ms > 83.3333:
-            current_speed_ms = 83.3333
+        # # Optional hard cap to reject outliers (~300 km/h)
+        # if current_speed_ms > 83.3333:
+        #     current_speed_ms = 83.3333
 
         # current_speed_ms = round(current_speed_ms, last_accel_decimals)
         return current_speed_ms
@@ -130,6 +127,9 @@ def gps_thread(gps_serial):
     global latest_gps, gps_last_update_time, latest_speed_source
     
     print("GPS thread started...")
+    
+    # Number of samples for averaging fallback speed
+    FALLBACK_SAMPLES = 104  # One batch worth of samples
 
     while not stop_event.is_set():
         try:
@@ -139,7 +139,7 @@ def gps_thread(gps_serial):
                 lat, lon, gps_speed = gps_data
                 
                 # Check if GPS speed is valid
-                if gps_speed is not None and 0 <= gps_speed <= 300:
+                if gps_speed is not None and 0.5 < gps_speed <= 300.0:
                     # Valid GPS speed - use it directly and anchor integrator
                     final_speed = gps_speed
                     speed_src = "GPS"
@@ -151,9 +151,16 @@ def gps_thread(gps_serial):
                     except Exception:
                         pass
                 else:
-                    # GPS speed unavailable or invalid - use accelerometer fallback
-                    accel_speed_ms = calculate_speed_from_accel()
-                    final_speed = accel_speed_ms * 3.6  # Convert m/s to km/h
+                    # GPS speed unavailable or invalid - calculate average from multiple samples
+                    speed_samples = []
+                    for _ in range(FALLBACK_SAMPLES):
+                        accel_speed_ms = calculate_speed_from_accel()
+                        speed_samples.append(accel_speed_ms)
+                        time.sleep(1.0 / TARGET_HZ)  # Sample at target rate
+                    
+                    # Calculate average speed and convert to km/h
+                    avg_speed_ms = sum(speed_samples) / len(speed_samples)
+                    final_speed = avg_speed_ms * 3.6
                     speed_src = "ACCEL"
                 
                 # Update global with final speed (either GPS or fallback)
@@ -162,9 +169,16 @@ def gps_thread(gps_serial):
                     gps_last_update_time = time.time()
                     latest_speed_source = speed_src
             else:
-                # GPS read failed completely - use fallback speed with (None, None, speed)
-                accel_speed_ms = calculate_speed_from_accel()
-                final_speed = accel_speed_ms * 3.6  # Convert m/s to km/h
+                # GPS read failed completely - calculate average from multiple samples
+                speed_samples = []
+                for _ in range(FALLBACK_SAMPLES):
+                    accel_speed_ms = calculate_speed_from_accel()
+                    speed_samples.append(accel_speed_ms)
+                    time.sleep(1.0 / TARGET_HZ)  # Sample at target rate
+                
+                # Calculate average speed and convert to km/h
+                avg_speed_ms = sum(speed_samples) / len(speed_samples)
+                final_speed = avg_speed_ms * 3.6
                 
                 with data_lock:
                     latest_gps = (None, None, final_speed)
@@ -173,9 +187,16 @@ def gps_thread(gps_serial):
                     
         except Exception as e:
             print(f"GPS thread error: {e}")
-            # On exception - use fallback speed with (None, None, speed)
-            accel_speed_ms = calculate_speed_from_accel()
-            final_speed = accel_speed_ms * 3.6
+            # On exception - calculate average from multiple samples
+            speed_samples = []
+            for _ in range(FALLBACK_SAMPLES):
+                accel_speed_ms = calculate_speed_from_accel()
+                speed_samples.append(accel_speed_ms)
+                time.sleep(1.0 / TARGET_HZ)  # Sample at target rate
+            
+            # Calculate average speed and convert to km/h
+            avg_speed_ms = sum(speed_samples) / len(speed_samples)
+            final_speed = avg_speed_ms * 3.6
             
             with data_lock:
                 latest_gps = (None, None, final_speed)
