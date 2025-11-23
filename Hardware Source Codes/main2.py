@@ -57,6 +57,11 @@ speed_calculation_lock = threading.Lock()
 gps_last_update_time = 0.0  # Track when GPS was last successfully updated
 GPS_TIMEOUT_SECONDS = 5.0  # Consider GPS stale after 5 seconds without update
 
+# Calibrated parameters from calibration analysis (calibrate_accel_to_speed.py)
+OPTIMAL_BIAS = 0.117588  # g - systematic accelerometer bias
+DEADBAND_G = 0.02  # g - suppress noise below this threshold
+G_TO_MS2 = 9.81  # m/s² - gravity constant for conversion
+
 # Shared memory for warning system communication
 shm_writer = None
 batch_buffer = []  # Accumulate 104 points before writing to shared memory
@@ -64,8 +69,14 @@ batch_buffer_lock = threading.Lock()
 
 def calculate_speed_from_accel():
     """Integrate x-axis acceleration to estimate forward speed (m/s).
-    - Uses latest `last_accel_ms2` (x-axis) and high-res dt from perf_counter.
-    - Applies small deadband and drift suppression; clamps to non-negative.
+    Uses calibrated bias correction and deadband filtering based on real-world data.
+    
+    Calibrated Formula (from calibrate_accel_to_speed.py):
+    1. Remove systematic bias: accel_corrected = acc_x - 0.117588 g
+    2. Apply deadband: if |accel_corrected| < 0.02g, set to 0
+    3. Integrate: speed += accel_corrected * 9.81 * dt
+    4. Clamp to realistic range
+    
     Returns current speed estimate in m/s.
     """
     global current_speed_ms, last_accel_ms2, last_speed_calc_ts, last_accel_decimals
@@ -79,21 +90,33 @@ def calculate_speed_from_accel():
         dt = max(0.0, now - last_speed_calc_ts)
         last_speed_calc_ts = now  # Update anchor
 
-        # Deadband to suppress noise (m/s^2)
-        accel = last_accel_ms2 if abs(last_accel_ms2) >= 0.2 else 0.0
+        # Convert m/s² back to g for bias correction
+        accel_g = last_accel_ms2 / G_TO_MS2
+        
+        # Apply calibrated bias correction
+        accel_corrected_g = accel_g - OPTIMAL_BIAS
+        
+        # Apply deadband to suppress noise (in g units)
+        if abs(accel_corrected_g) < DEADBAND_G:
+            accel_corrected_g = 0.0
+        
+        # Convert back to m/s² for integration
+        accel_corrected_ms2 = accel_corrected_g * G_TO_MS2
 
         # Integrate acceleration (v = ∫a dt)
-        current_speed_ms += accel * dt
+        current_speed_ms += accel_corrected_ms2 * dt
 
-        # # Clamp to non-negative and suppress tiny drift
-        # if current_speed_ms < 0.0:
-        #     current_speed_ms = 0.0
+        # Clamp to non-negative and suppress tiny drift
+        if current_speed_ms < 0.0:
+            current_speed_ms = 0.0
+        elif abs(accel_corrected_ms2) < 0.05 and current_speed_ms < 0.05:
+            # When nearly no accel and speed tiny, snap to zero
+            current_speed_ms = 0.0
 
-        # # Optional hard cap to reject outliers (~300 km/h)
-        # if current_speed_ms > 83.3333:
-        #     current_speed_ms = 83.3333
+        # Optional hard cap to reject outliers (~300 km/h)
+        if current_speed_ms > 83.3333:
+            current_speed_ms = 83.3333
 
-        # current_speed_ms = round(current_speed_ms, last_accel_decimals)
         return current_speed_ms
 
 def mpu_thread():
@@ -123,7 +146,9 @@ def mpu_thread():
         time.sleep(0.001)
 
 def gps_thread(gps_serial):
-    """GPS thread - reads GPS data and handles speed fallback before updating global variable."""
+    """GPS thread - reads GPS data and handles speed fallback before updating global variable.
+    Uses calibrated accelerometer integration when GPS speed is unavailable, invalid, or zero.
+    """
     global latest_gps, gps_last_update_time, latest_speed_source
     
     print("GPS thread started...")
@@ -138,7 +163,7 @@ def gps_thread(gps_serial):
             if gps_data and gps_data != (None, None, None):
                 lat, lon, gps_speed = gps_data
                 
-                # Check if GPS speed is valid
+                # Check if GPS speed is valid (must be non-zero and within realistic range)
                 if gps_speed is not None and 0.5 < gps_speed <= 300.0:
                     # Valid GPS speed - use it directly and anchor integrator
                     final_speed = gps_speed
@@ -150,6 +175,19 @@ def gps_thread(gps_serial):
                             last_speed_calc_ts = time.perf_counter()
                     except Exception:
                         pass
+                elif gps_speed is not None and abs(gps_speed) < 0.5:
+                    # GPS reports zero or near-zero speed - use fallback calculation
+                    # This handles cases where GPS is available but reports 0 (stationary or GPS error)
+                    speed_samples = []
+                    for _ in range(FALLBACK_SAMPLES):
+                        accel_speed_ms = calculate_speed_from_accel()
+                        speed_samples.append(accel_speed_ms)
+                        time.sleep(1.0 / TARGET_HZ)  # Sample at target rate
+                    
+                    # Calculate average speed and convert to km/h
+                    avg_speed_ms = sum(speed_samples) / len(speed_samples)
+                    final_speed = avg_speed_ms * 3.6
+                    speed_src = "ACCEL"
                 else:
                     # GPS speed unavailable or invalid - calculate average from multiple samples
                     speed_samples = []
