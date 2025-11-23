@@ -11,9 +11,11 @@ WARNING_DIR="Warning\ Generation\ Algorithm/"
 run:
 	@echo "Fixing GPS port permissions..."
 	@sudo chmod 666 /dev/ttyS0
-	@echo "Starting live_detect.py (.venv), main2.py (my_env), and Warning_Generate.py (my_env) together..."
-	@ (source $(VENV)/bin/activate && python "$(WARNING_DIR)/live_detect.py") & \
-	  (source $(MY_ENV)/bin/activate && python "$(CODE_DIR)/main2.py") & \
+	@echo "Starting main2.py first to initialize shared memory..."
+	@ (source $(MY_ENV)/bin/activate && python "$(CODE_DIR)/main2.py") & \
+	  sleep 3 && \
+	  echo "Starting Warning_Generate.py and live_detect.py..." && \
 	  (source $(MY_ENV)/bin/activate && python "$(WARNING_DIR)/Warning_Generate.py") & \
+	  (source $(VENV)/bin/activate && python "$(WARNING_DIR)/live_detect.py") & \
 	  wait
 
