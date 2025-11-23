@@ -107,11 +107,11 @@ def calculate_speed_from_accel():
         current_speed_ms += accel_corrected_ms2 * dt
 
         # Clamp to non-negative and suppress tiny drift
-        if current_speed_ms < 0.0:
-            current_speed_ms = 0.0
-        elif abs(accel_corrected_ms2) < 0.05 and current_speed_ms < 0.05:
-            # When nearly no accel and speed tiny, snap to zero
-            current_speed_ms = 0.0
+        # if current_speed_ms < 0.0:
+        #     current_speed_ms = 0.0
+        # elif abs(accel_corrected_ms2) < 0.05 and current_speed_ms < 0.05:
+        #     # When nearly no accel and speed tiny, snap to zero
+        #     current_speed_ms = 0.0
 
         # Optional hard cap to reject outliers (~300 km/h)
         if current_speed_ms > 83.3333:
